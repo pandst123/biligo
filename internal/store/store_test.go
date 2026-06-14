@@ -70,4 +70,15 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.TimeOffsetMillis != 88 || task.TimeSyncedAt == "" {
 		t.Fatalf("unexpected time sync fields: %#v", task)
 	}
+
+	task, log, err = store.SetTaskPayMoney(context.Background(), task.ID, 140000, "金额已更新")
+	if err != nil {
+		t.Fatalf("SetTaskPayMoney: %v", err)
+	}
+	if log.ID == 0 {
+		t.Fatal("pay money log was not created")
+	}
+	if task.PayMoney != 140000 {
+		t.Fatalf("PayMoney = %d, want 140000", task.PayMoney)
+	}
 }

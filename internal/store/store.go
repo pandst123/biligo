@@ -568,6 +568,34 @@ func (s *Store) SetTaskTimeSync(ctx context.Context, id int64, strategy string, 
 	return task, log, nil
 }
 
+func (s *Store) SetTaskPayMoney(ctx context.Context, id int64, payMoney int64, message string) (model.Task, model.TaskLog, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks
+		SET pay_money = ?,
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			updated_at = ?
+		WHERE id = ?
+	`, payMoney, strings.TrimSpace(message), now, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+
+	var log model.TaskLog
+	if strings.TrimSpace(message) != "" {
+		log, err = s.AddTaskLog(ctx, id, "warn", message)
+		if err != nil {
+			return model.Task{}, model.TaskLog{}, err
+		}
+	}
+
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+	return task, log, nil
+}
+
 func (s *Store) AddTaskLog(ctx context.Context, taskID int64, level string, message string) (model.TaskLog, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO task_logs (task_id, level, message, created_at)

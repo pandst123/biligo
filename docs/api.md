@@ -517,13 +517,12 @@
 | --- | --- |
 | `draft` | 草稿，已创建但未下发 |
 | `waiting_start` | 已下发，等待票档起售时间 |
-| `running` | 正在检测票档并尝试订单流程 |
+| `running` | 正在检测票档并尝试订单流程；运行中的接口错误会记录日志并继续重试 |
 | `waiting_payment` | 已创建订单，等待用户支付 |
 | `succeeded` | 订单接口成功但没有可展示的支付二维码 |
 | `duplicate_order` | 检测到重复订单 |
 | `paused` | 已暂停 |
 | `failed` | 任务失败或超时停止 |
-| `waiting_user` | 等待用户处理验证码、风控确认、实名确认或登录失效 |
 
 ### POST `/api/tasks`
 

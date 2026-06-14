@@ -147,7 +147,8 @@ func TestRunnerPollsUntilAvailableAndStoresPayment(t *testing.T) {
 	}
 }
 
-func TestRunnerStopsForLoginRequired(t *testing.T) {
+func TestRunnerRetriesPrepareOrderErrors(t *testing.T) {
+	var prepareCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -156,7 +157,15 @@ func TestRunnerStopsForLoginRequired(t *testing.T) {
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
-			writeRunnerJSON(t, w, map[string]any{"code": -101, "msg": "请先登录"})
+			if prepareCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{"code": -101, "msg": "请先登录"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
 		default:
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
 		}
@@ -171,9 +180,149 @@ func TestRunnerStopsForLoginRequired(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 
-	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_user")
-	if updated.LastMessage == "" {
-		t.Fatal("LastMessage is empty")
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	if prepareCalls.Load() < 2 {
+		t.Fatalf("prepare calls = %d, want at least 2", prepareCalls.Load())
+	}
+}
+
+func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			if createCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{"code": 0, "message": "defaultBBR"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	if createCalls.Load() < 2 {
+		t.Fatalf("create calls = %d, want at least 2", createCalls.Load())
+	}
+}
+
+func TestRunnerUpdatesPayMoneyForCreateV2PriceChange(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			if createCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{
+					"code": 100034,
+					"data": map[string]any{"pay_money": 69000},
+				})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 69000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	if updated.PayMoney != 69000 {
+		t.Fatalf("PayMoney = %d, want 69000", updated.PayMoney)
+	}
+	if createCalls.Load() < 2 {
+		t.Fatalf("create calls = %d, want at least 2", createCalls.Load())
+	}
+}
+
+func TestRunnerRetriesPayParamErrorsWithoutRecreatingOrder(t *testing.T) {
+	var createCalls atomic.Int32
+	var payCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			createCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			if payCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{"code": 503, "message": "service unavailable"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.PaymentURL != "https://pay.example.test/order/ORDER-1" {
+		t.Fatalf("PaymentURL = %q", updated.PaymentURL)
+	}
+	if createCalls.Load() != 1 {
+		t.Fatalf("create calls = %d, want 1", createCalls.Load())
+	}
+	if payCalls.Load() < 2 {
+		t.Fatalf("pay calls = %d, want at least 2", payCalls.Load())
 	}
 }
 

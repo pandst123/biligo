@@ -177,17 +177,7 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		option, available, err := m.ticket.CheckTicketStatus(ctx, latestTask, cookie)
 		checkedAt := time.Now().Format(time.RFC3339)
 		if err != nil {
-			status := "running"
-			level := "warn"
-			if requiresUserAction(err.Error()) {
-				status = "waiting_user"
-				level = "error"
-			}
-			m.setRuntimeWithCheckedAt(taskID, status, "检测票档状态失败："+err.Error(), level, checkedAt)
-			if status == "waiting_user" {
-				return
-			}
-			if !m.wait(ctx, interval) {
+			if !m.retryRunError(ctx, taskID, "检测票档状态失败："+err.Error(), checkedAt, interval) {
 				return
 			}
 			continue
@@ -203,8 +193,10 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		m.setRuntimeWithCheckedAt(taskID, "running", "票档可购买，开始准备订单。", "info", checkedAt)
 		prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
-			m.handleRunError(taskID, "订单准备失败："+err.Error())
-			return
+			if !m.retryRunError(ctx, taskID, "订单准备失败："+err.Error(), checkedAt, interval) {
+				return
+			}
+			continue
 		}
 		result, err := m.ticket.CreateOrder(ctx, latestTask, cookie, prepared)
 		if err != nil {
@@ -212,20 +204,26 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 				m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
 				return
 			}
-			m.handleRunError(taskID, "创建订单失败："+err.Error())
-			return
+			if result.Code == 100034 && result.PayMoney > 0 {
+				m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+			}
+			if !m.retryRunError(ctx, taskID, "创建订单失败："+err.Error(), checkedAt, interval) {
+				return
+			}
+			continue
 		}
 		if result.Code == 100079 {
 			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
 			return
 		}
 		if result.OrderID == "" {
-			m.setRuntime(taskID, "succeeded", "订单接口返回成功，但未返回订单 ID。", "warn")
-			return
+			if !m.retryRunError(ctx, taskID, "订单接口返回成功，但未返回订单 ID", checkedAt, interval) {
+				return
+			}
+			continue
 		}
-		payParam, err := m.ticket.GetPayParam(ctx, result.OrderID, cookie)
-		if err != nil {
-			m.setRuntime(taskID, "succeeded", "订单创建成功，但获取支付二维码失败："+err.Error(), "warn")
+		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, endAt, timeOffset)
+		if !ok {
 			return
 		}
 		task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
@@ -243,12 +241,47 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 	}
 }
 
-func (m *Manager) handleRunError(taskID int64, message string) {
-	status := "failed"
-	if requiresUserAction(message) {
-		status = "waiting_user"
+func (m *Manager) applyPayMoneyUpdate(taskID int64, oldPayMoney int64, newPayMoney int64) {
+	if newPayMoney <= 0 || newPayMoney == oldPayMoney {
+		return
 	}
-	m.setRuntime(taskID, status, message, "error")
+	message := fmt.Sprintf("createV2 返回订单金额更新，已将任务金额从 %d 分更新为 %d 分。", oldPayMoney, newPayMoney)
+	task, log, err := m.store.SetTaskPayMoney(context.Background(), taskID, newPayMoney, message)
+	if err == nil {
+		m.publishTaskAndLog(task, log)
+	}
+}
+
+func (m *Manager) retryRunError(ctx context.Context, taskID int64, message string, checkedAt string, interval time.Duration) bool {
+	m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage(message), "warn", checkedAt)
+	return m.wait(ctx, interval)
+}
+
+func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, endAt time.Time, timeOffset time.Duration) (biliticket.PayParamResult, bool) {
+	for {
+		if ctx.Err() != nil {
+			return biliticket.PayParamResult{}, false
+		}
+		if nowWithOffset(timeOffset).After(endAt) {
+			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止获取支付参数。", "warn")
+			return biliticket.PayParamResult{}, false
+		}
+		payParam, err := m.ticket.GetPayParam(ctx, orderID, cookie)
+		if err == nil {
+			return payParam, true
+		}
+		if !m.retryRunError(ctx, taskID, "订单创建成功，但获取支付二维码失败："+err.Error(), time.Now().Format(time.RFC3339), interval) {
+			return biliticket.PayParamResult{}, false
+		}
+	}
+}
+
+func formatRetryMessage(message string) string {
+	message = strings.TrimRight(strings.TrimSpace(message), "。")
+	if message == "" {
+		message = "运行异常"
+	}
+	return message + "，继续重试。"
 }
 
 func (m *Manager) setRuntime(taskID int64, status string, message string, level string) {
@@ -422,17 +455,6 @@ func parseTaskTime(value string) (time.Time, error) {
 		lastErr = err
 	}
 	return time.Time{}, lastErr
-}
-
-func requiresUserAction(message string) bool {
-	message = strings.ToLower(message)
-	keywords := []string{"验证码", "风控", "人机", "实名", "请先登录", "登录", "risk", "captcha", "verify", "defaultbbr"}
-	for _, keyword := range keywords {
-		if strings.Contains(message, strings.ToLower(keyword)) {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonEmpty(values ...string) string {

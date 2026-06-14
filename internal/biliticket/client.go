@@ -307,7 +307,7 @@ func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string
 		Raw:      response,
 	}
 	if !isCreateSuccess(response, code) {
-		return result, apiError(response, "创建订单失败")
+		return result, createV2Error(response)
 	}
 	return result, nil
 }
@@ -813,7 +813,11 @@ func isCreateSuccess(response map[string]any, code int64) bool {
 		return true
 	}
 	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
-	return code == 0 && !strings.Contains(message, "defaultBBR")
+	return code == 0 && !IsDefaultBBRMessage(message)
+}
+
+func IsDefaultBBRMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "defaultbbr")
 }
 
 func apiError(response map[string]any, fallback string) error {
@@ -823,6 +827,64 @@ func apiError(response map[string]any, fallback string) error {
 		return fmt.Errorf("[%d] %s", code, message)
 	}
 	return errors.New(message)
+}
+
+func createV2Error(response map[string]any) error {
+	code, _ := optionalCode(response)
+	return errors.New(createV2StatusMessage(response, code))
+}
+
+func createV2StatusMessage(response map[string]any, code int64) string {
+	apiMessage := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	message := createV2StatusHint(response, code, apiMessage)
+	if message == "" {
+		message = firstNonEmpty(apiMessage, "创建订单失败")
+	}
+	return fmt.Sprintf("状态码：%d，提示信息：%s", code, message)
+}
+
+func createV2StatusHint(response map[string]any, code int64, apiMessage string) string {
+	if code == 0 && IsDefaultBBRMessage(apiMessage) {
+		return "createV2 返回 defaultBBR 警告，继续重试。"
+	}
+
+	switch code {
+	case 504:
+		return "网关超时，B 站服务响应超时，可稍后重试。"
+	case 503:
+		return "服务不可用，B 站服务暂时不可用，可稍后重试。"
+	case 412:
+		return "触发风控，建议暂停一段时间，并在平台页面确认账号状态后再重试。"
+	case -401:
+		return "触发全局风控或登录校验，请检查账号登录态，并手动完成平台验证。"
+	case 429:
+		return "请求被限流，请降低频率后再重试。"
+	case 100001:
+		return "请求被阻塞，可稍后重试。"
+	case 900001:
+		return "请求被阻塞，可稍后重试。"
+	case 900002:
+		return "请求被阻塞，可稍后重试。"
+	case 100009:
+		return "库存不足，当前票档暂无库存。"
+	case 100044:
+		return "检测到验证码风控，请手动完成平台验证码后再继续。"
+	case 100034:
+		data, _ := mapValue(response["data"])
+		payMoney := int64Value(data["pay_money"])
+		if payMoney > 0 {
+			return fmt.Sprintf("订单金额已由接口更新为 %d 分，将自动更新任务金额后重试。", payMoney)
+		}
+		return "订单金额已由接口更新，将自动重试。"
+	case 3:
+		return "触发 5 秒盾，请等待后再重试。"
+	case 221:
+		return "请求被阻塞，可稍后重试。"
+	case 219:
+		return "库存不足，当前票档暂无库存。"
+	default:
+		return ""
+	}
 }
 
 func formatSaleStatus(ticket map[string]any) string {

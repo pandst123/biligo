@@ -44,3 +44,4 @@ SQLite
 
 ## 特别鸣谢
 项目 [biliTickerBuy](https://github.com/mikumifa/biliTickerBuy) 提供抢票相关逻辑
+项目 [BHYG](https://github.com/ZianTT/BHYG) 提供风控监测相关逻辑

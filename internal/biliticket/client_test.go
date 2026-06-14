@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +53,71 @@ func TestNormalizeBuyerAndAddress(t *testing.T) {
 	})
 	if address.ID != 9 || address.FullAddress != "上海市上海市徐汇区测试路 1 号" {
 		t.Fatalf("unexpected address: %#v", address)
+	}
+}
+
+func TestCreateV2StatusMessageHints(t *testing.T) {
+	tests := []struct {
+		name     string
+		response map[string]any
+		want     string
+	}{
+		{
+			name: "default bbr",
+			response: map[string]any{
+				"code":    0,
+				"message": "defaultBBR blocked",
+			},
+			want: "状态码：0，提示信息：createV2 返回 defaultBBR 警告，继续重试。",
+		},
+		{
+			name: "captcha",
+			response: map[string]any{
+				"code": 100044,
+			},
+			want: "状态码：100044，提示信息：检测到验证码风控",
+		},
+		{
+			name: "pay money changed",
+			response: map[string]any{
+				"code": 100034,
+				"data": map[string]any{
+					"pay_money": 68000,
+				},
+			},
+			want: "68000 分",
+		},
+		{
+			name: "stock not enough",
+			response: map[string]any{
+				"code": 100009,
+			},
+			want: "状态码：100009，提示信息：库存不足",
+		},
+		{
+			name: "unknown keeps api message",
+			response: map[string]any{
+				"code": 123456,
+				"msg":  "未知错误",
+			},
+			want: "状态码：123456，提示信息：未知错误",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, _ := optionalCode(tt.response)
+			got := createV2StatusMessage(tt.response, code)
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("createV2StatusMessage() = %q, want contains %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultBBRIsRetryableCreateWarning(t *testing.T) {
+	if isCreateSuccess(map[string]any{"message": "defaultBBR"}, 0) {
+		t.Fatal("defaultBBR should be treated as a retryable create warning")
 	}
 }
 
