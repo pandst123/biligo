@@ -1,0 +1,17 @@
+# Local data
+data/
+config.yaml
+
+# Go
+*.test
+coverage.out
+/server
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS / editor
+.DS_Store
+.idea/

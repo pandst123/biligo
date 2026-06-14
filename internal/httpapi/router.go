@@ -1,0 +1,615 @@
+package httpapi
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/fdcs99/biligo/internal/biliauth"
+	"github.com/fdcs99/biligo/internal/biliticket"
+	"github.com/fdcs99/biligo/internal/events"
+	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/runner"
+	"github.com/fdcs99/biligo/internal/store"
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	store  *store.Store
+	auth   *biliauth.Client
+	ticket *biliticket.Client
+	hub    *events.Hub
+	runner *runner.Manager
+}
+
+func NewRouter(store *store.Store) *gin.Engine {
+	router := gin.Default()
+	router.Use(devCORS())
+
+	hub := events.NewHub()
+	ticket := biliticket.NewClient(nil)
+	handler := &Handler{
+		store:  store,
+		auth:   biliauth.NewClient(nil),
+		ticket: ticket,
+		hub:    hub,
+		runner: runner.NewManager(store, ticket, hub),
+	}
+	api := router.Group("/api")
+	{
+		api.GET("/health", handler.health)
+		api.GET("/events", handler.events)
+		api.GET("/auth/session", handler.sessionSummary)
+		api.POST("/auth/qr/start", handler.startQRLogin)
+		api.POST("/auth/qr/poll", handler.pollQRLogin)
+		api.POST("/auth/cookie-login", handler.cookieLogin)
+
+		api.GET("/accounts", handler.listAccounts)
+		api.POST("/accounts", handler.createAccount)
+		api.PUT("/accounts/:id", handler.updateAccount)
+		api.GET("/accounts/:id/cookie", handler.accountCookie)
+		api.POST("/accounts/:id/verify", handler.verifyAccount)
+		api.DELETE("/accounts/:id", handler.deleteAccount)
+
+		api.GET("/ticket-projects/history", handler.listTicketProjectHistory)
+		api.POST("/ticket-projects/fetch", handler.fetchTicketProject)
+		api.POST("/ticket-projects/account-context", handler.fetchTicketAccountContext)
+
+		api.GET("/tasks", handler.listTasks)
+		api.POST("/tasks", handler.createTask)
+		api.PUT("/tasks/:id", handler.updateTask)
+		api.DELETE("/tasks/:id", handler.deleteTask)
+		api.POST("/tasks/:id/dispatch", handler.dispatchTask)
+		api.POST("/tasks/:id/pause", handler.pauseTask)
+		api.GET("/tasks/:id/logs", handler.listTaskLogs)
+
+		api.GET("/logs", handler.listLogs)
+	}
+
+	return router
+}
+
+func devCORS() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type")
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+func (h *Handler) health(c *gin.Context) {
+	status := model.Health{
+		Status:   "ok",
+		Database: "ok",
+		Time:     time.Now().Format(time.RFC3339),
+	}
+	if err := h.store.Ping(c.Request.Context()); err != nil {
+		status.Status = "error"
+		status.Database = err.Error()
+		c.JSON(http.StatusServiceUnavailable, status)
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
+func (h *Handler) events(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	id, ch := h.hub.Subscribe()
+	defer h.hub.Unsubscribe(id)
+
+	tasks, taskErr := h.store.ListTasks(c.Request.Context())
+	logs, logErr := h.store.ListTaskLogs(c.Request.Context(), 0)
+	if taskErr == nil && logErr == nil {
+		writeSSE(c, "snapshot", model.EventSnapshot{Tasks: tasks, Logs: logs})
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event.Name, event.Data)
+			c.Writer.Flush()
+		case <-ticker.C:
+			writeSSE(c, "heartbeat", gin.H{"time": time.Now().Format(time.RFC3339)})
+		}
+	}
+}
+
+func (h *Handler) sessionSummary(c *gin.Context) {
+	summary, err := h.store.SessionSummary(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+func (h *Handler) startQRLogin(c *gin.Context) {
+	result, err := h.auth.StartQRLogin(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, model.QRLoginStartResponse{
+		OK:               result.OK,
+		LoginURL:         result.LoginURL,
+		QRCodeKey:        result.QRCodeKey,
+		QRImageDataURL:   result.QRImageDataURL,
+		ExpiresInSeconds: result.ExpiresInSeconds,
+		NextAction:       "show_qr_and_confirm_scan",
+	})
+}
+
+func (h *Handler) pollQRLogin(c *gin.Context) {
+	var input model.QRLoginPollInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	if strings.TrimSpace(input.QRCodeKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "qrcodeKey 不能为空"})
+		return
+	}
+
+	result, err := h.auth.PollQRLogin(c.Request.Context(), input.QRCodeKey)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+
+	response := model.QRLoginPollResponse{
+		OK:       result.OK,
+		Status:   result.Status,
+		Message:  result.Message,
+		Code:     result.Code,
+		Username: result.Username,
+	}
+	if result.Status == "confirmed" && result.Cookie != "" {
+		name := strings.TrimSpace(input.AccountName)
+		if name == "" {
+			name = firstNonEmpty(result.Username, "Bilibili 账号")
+		}
+		account, err := h.store.CreateAccountWithStatus(c.Request.Context(), model.AccountInput{
+			Name:   name,
+			Cookie: result.Cookie,
+			Note:   input.Note,
+		}, "logged_in")
+		if err != nil {
+			respondError(c, err)
+			return
+		}
+		response.Account = &account
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) cookieLogin(c *gin.Context) {
+	var input model.CookieLoginInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	if strings.TrimSpace(input.Cookie) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cookie 不能为空"})
+		return
+	}
+
+	cookie := biliauth.NormalizeCookieHeader(input.Cookie)
+	username, loggedIn, err := h.auth.VerifyCookie(c.Request.Context(), cookie)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if !loggedIn {
+		c.JSON(http.StatusOK, model.CookieLoginResponse{
+			OK:       false,
+			LoggedIn: false,
+			Message:  "Cookie 未通过 Bilibili 登录态验证。",
+		})
+		return
+	}
+
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = username
+	}
+	account, err := h.store.CreateAccountWithStatus(c.Request.Context(), model.AccountInput{
+		Name:   name,
+		Cookie: cookie,
+		Note:   input.Note,
+	}, "logged_in")
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, model.CookieLoginResponse{
+		OK:       true,
+		LoggedIn: true,
+		Username: username,
+		Message:  "登录态验证成功，账号已保存。",
+		Account:  &account,
+	})
+}
+
+func (h *Handler) listAccounts(c *gin.Context) {
+	accounts, err := h.store.ListAccounts(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, accounts)
+}
+
+func (h *Handler) createAccount(c *gin.Context) {
+	var input model.AccountInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "账号名称不能为空") {
+		return
+	}
+	account, err := h.store.CreateAccount(c.Request.Context(), input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, account)
+}
+
+func (h *Handler) updateAccount(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input model.AccountInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "账号名称不能为空") {
+		return
+	}
+	account, err := h.store.UpdateAccount(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, account)
+}
+
+func (h *Handler) accountCookie(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+
+	account, cookie, err := h.store.GetAccountCookie(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if strings.TrimSpace(cookie) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "账号未保存 Cookie"})
+		return
+	}
+
+	c.JSON(http.StatusOK, model.AccountCookieResponse{
+		AccountID:     account.ID,
+		Cookie:        cookie,
+		CookiePreview: account.CookiePreview,
+	})
+}
+
+func (h *Handler) verifyAccount(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+
+	_, cookie, err := h.store.GetAccountCookie(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if strings.TrimSpace(cookie) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "账号未保存 Cookie"})
+		return
+	}
+
+	username, loggedIn, err := h.auth.VerifyCookie(c.Request.Context(), cookie)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+
+	status := "login_invalid"
+	message := "Cookie 未通过 Bilibili 登录态验证。"
+	if loggedIn {
+		status = "logged_in"
+		message = "登录态验证成功。"
+	}
+	account, err := h.store.UpdateAccountStatus(c.Request.Context(), id, status)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, model.AccountVerifyResponse{
+		OK:        true,
+		LoggedIn:  loggedIn,
+		AccountID: id,
+		Username:  username,
+		Message:   message,
+		Account:   &account,
+	})
+}
+
+func (h *Handler) deleteAccount(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if err := h.store.DeleteAccount(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) listTicketProjectHistory(c *gin.Context) {
+	history, err := h.store.ListTicketProjectHistory(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, history)
+}
+
+func (h *Handler) fetchTicketProject(c *gin.Context) {
+	var input model.TicketProjectFetchInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	if strings.TrimSpace(input.ProjectInput) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "项目 ID 不能为空"})
+		return
+	}
+	if _, err := biliticket.ExtractProjectID(input.ProjectInput); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	project, err := h.ticket.FetchProject(c.Request.Context(), input.ProjectInput, "")
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if err := h.store.UpsertTicketProjectHistory(c.Request.Context(), project); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, project)
+}
+
+func (h *Handler) fetchTicketAccountContext(c *gin.Context) {
+	var input model.TicketAccountContextInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	if input.AccountID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请先选择账号"})
+		return
+	}
+	if strings.TrimSpace(input.ProjectInput) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "项目 ID 不能为空"})
+		return
+	}
+	projectID, err := biliticket.ExtractProjectID(input.ProjectInput)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	_, cookie, err := h.store.GetAccountCookie(c.Request.Context(), input.AccountID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if strings.TrimSpace(cookie) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "所选账号未保存 Cookie"})
+		return
+	}
+
+	context, err := h.ticket.FetchAccountContext(c.Request.Context(), projectID, cookie)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, context)
+}
+
+func (h *Handler) listTasks(c *gin.Context) {
+	tasks, err := h.store.ListTasks(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+func (h *Handler) createTask(c *gin.Context) {
+	var input model.TaskInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") {
+		return
+	}
+	task, err := h.store.CreateTask(c.Request.Context(), input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	h.hub.Publish("task.updated", task)
+	c.JSON(http.StatusCreated, task)
+}
+
+func (h *Handler) updateTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input model.TaskInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") {
+		return
+	}
+	task, err := h.store.UpdateTask(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	h.hub.Publish("task.updated", task)
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) deleteTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	h.runner.Cancel(id)
+	if err := h.store.DeleteTask(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	h.hub.Publish("task.deleted", gin.H{"id": id})
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) dispatchTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	task, err := h.runner.Dispatch(c.Request.Context(), id)
+	if err != nil {
+		respondTaskActionError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) pauseTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	task, err := h.runner.Pause(c.Request.Context(), id)
+	if err != nil {
+		respondTaskActionError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) listTaskLogs(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	logs, err := h.store.ListTaskLogs(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func (h *Handler) listLogs(c *gin.Context) {
+	var taskID int64
+	if raw := c.Query("task_id"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 必须是数字"})
+			return
+		}
+		taskID = parsed
+	}
+	logs, err := h.store.ListTaskLogs(c.Request.Context(), taskID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func bindJSON(c *gin.Context, target any) bool {
+	if err := c.ShouldBindJSON(target); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体不是有效 JSON"})
+		return false
+	}
+	return true
+}
+
+func requireName(c *gin.Context, value string, message string) bool {
+	if strings.TrimSpace(value) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": message})
+		return false
+	}
+	return true
+}
+
+func parseID(c *gin.Context) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID 必须是正整数"})
+		return 0, false
+	}
+	return id, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func respondError(c *gin.Context, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+}
+
+func respondTaskActionError(c *gin.Context, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+}
+
+func writeSSE(c *gin.Context, name string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", name, data)
+	c.Writer.Flush()
+}

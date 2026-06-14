@@ -1,0 +1,1092 @@
+package biliticket
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/fdcs99/biligo/internal/biliauth"
+	"github.com/fdcs99/biligo/internal/model"
+	"github.com/skip2/go-qrcode"
+)
+
+const (
+	defaultShowBaseURL = "https://show.bilibili.com"
+	defaultMallBaseURL = "https://mall.bilibili.com"
+	defaultAPIBaseURL  = "https://api.bilibili.com"
+	showReferer        = "https://show.bilibili.com/"
+	ticketUserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+var projectIDPattern = regexp.MustCompile(`^\d+$`)
+
+var saleFlagNumberMap = map[int64]string{
+	1:   "不可售",
+	2:   "预售",
+	3:   "停售",
+	4:   "售罄",
+	5:   "不可用",
+	6:   "库存紧张",
+	8:   "暂时售罄",
+	9:   "不在白名单",
+	101: "未开始",
+	102: "已结束",
+	103: "未完成",
+	105: "下架",
+	106: "已取消",
+}
+
+type Client struct {
+	httpClient  *http.Client
+	showBaseURL string
+	mallBaseURL string
+	apiBaseURL  string
+}
+
+type OrderPrepareResult struct {
+	Token  string
+	PToken string
+	Raw    map[string]any
+}
+
+type OrderCreateResult struct {
+	Code     int64
+	Message  string
+	OrderID  string
+	PayMoney int64
+	Raw      map[string]any
+}
+
+type PayParamResult struct {
+	CodeURL        string
+	QRImageDataURL string
+	Raw            map[string]any
+}
+
+type projectPayload struct {
+	ID         int64
+	Name       string
+	HotProject bool
+	HasETicket bool
+	ScreenList []map[string]any
+	SalesDates []string
+	VenueName  string
+	VenueAddr  string
+	StartTime  int64
+	EndTime    int64
+}
+
+func NewClient(httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &Client{
+		httpClient:  httpClient,
+		showBaseURL: defaultShowBaseURL,
+		mallBaseURL: defaultMallBaseURL,
+		apiBaseURL:  defaultAPIBaseURL,
+	}
+}
+
+func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
+	client := NewClient(httpClient)
+	if strings.TrimSpace(baseURL) != "" {
+		baseURL = strings.TrimRight(baseURL, "/")
+		client.showBaseURL = baseURL
+		client.mallBaseURL = baseURL
+		client.apiBaseURL = baseURL
+	}
+	return client
+}
+
+func ExtractProjectID(projectInput string) (int64, error) {
+	text := cleanProjectIDToken(projectInput)
+	if text == "" {
+		return 0, errors.New("项目 ID 不能为空")
+	}
+	if projectIDPattern.MatchString(text) {
+		return strconv.ParseInt(text, 10, 64)
+	}
+
+	parsed, err := url.Parse(text)
+	if err != nil {
+		return 0, errors.New("无法解析项目链接")
+	}
+	values := parsed.Query()
+	if raw := cleanProjectIDToken(values.Get("id")); projectIDPattern.MatchString(raw) {
+		return strconv.ParseInt(raw, 10, 64)
+	}
+	return 0, errors.New("请输入纯数字项目 ID，或包含 id 参数的会员购详情页链接")
+}
+
+func cleanProjectIDToken(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "+")
+}
+
+func (c *Client) FetchProject(ctx context.Context, projectInput string, cookie string) (model.TicketProject, error) {
+	projectID, err := ExtractProjectID(projectInput)
+	if err != nil {
+		return model.TicketProject{}, err
+	}
+	cookie = biliauth.NormalizeCookieHeader(cookie)
+
+	payload, err := c.fetchProjectPayload(ctx, projectID, cookie)
+	if err != nil {
+		return model.TicketProject{}, err
+	}
+
+	screens := copyScreens(payload.ScreenList)
+	for _, date := range payload.SalesDates {
+		dateScreens, err := c.fetchScreensByDate(ctx, payload.ID, date, cookie)
+		if err != nil {
+			continue
+		}
+		for _, screen := range dateScreens {
+			if int64Value(screen["project_id"]) == 0 {
+				screen["project_id"] = payload.ID
+			}
+		}
+		screens = mergeScreensByID(screens, dateScreens)
+	}
+
+	screens = append(screens, c.fetchLinkGoods(ctx, payload.ID, cookie)...)
+	options := buildTicketOptions(payload, screens)
+
+	return model.TicketProject{
+		ProjectID:     payload.ID,
+		ProjectName:   payload.Name,
+		ProjectURL:    fmt.Sprintf("https://show.bilibili.com/platform/detail.html?id=%d", payload.ID),
+		VenueName:     payload.VenueName,
+		VenueAddress:  payload.VenueAddr,
+		StartAt:       formatUnix(payload.StartTime),
+		EndAt:         formatUnix(payload.EndTime),
+		IsHotProject:  payload.HotProject,
+		HasETicket:    payload.HasETicket,
+		SalesDates:    payload.SalesDates,
+		TicketOptions: options,
+		Buyers:        []model.TicketBuyer{},
+		Addresses:     []model.TicketAddress{},
+	}, nil
+}
+
+func (c *Client) FetchPurchaseContext(ctx context.Context, projectInput string, cookie string) (model.TicketProject, error) {
+	project, err := c.FetchProject(ctx, projectInput, cookie)
+	if err != nil {
+		return model.TicketProject{}, err
+	}
+	if strings.TrimSpace(cookie) == "" {
+		return project, nil
+	}
+
+	project.Username = c.fetchUsername(ctx, cookie)
+	buyers, err := c.fetchBuyers(ctx, project.ProjectID, cookie)
+	if err != nil {
+		return model.TicketProject{}, err
+	}
+	addresses, err := c.fetchAddresses(ctx, cookie)
+	if err != nil {
+		return model.TicketProject{}, err
+	}
+	project.Buyers = buyers
+	project.Addresses = addresses
+	return project, nil
+}
+
+func (c *Client) FetchAccountContext(ctx context.Context, projectID int64, cookie string) (model.TicketAccountContext, error) {
+	if projectID <= 0 {
+		return model.TicketAccountContext{}, errors.New("项目 ID 不能为空")
+	}
+	cookie = biliauth.NormalizeCookieHeader(cookie)
+	if strings.TrimSpace(cookie) == "" {
+		return model.TicketAccountContext{}, errors.New("账号 Cookie 不能为空")
+	}
+
+	buyers, err := c.fetchBuyers(ctx, projectID, cookie)
+	if err != nil {
+		return model.TicketAccountContext{}, err
+	}
+	addresses, err := c.fetchAddresses(ctx, cookie)
+	if err != nil {
+		return model.TicketAccountContext{}, err
+	}
+	return model.TicketAccountContext{
+		ProjectID: projectID,
+		Username:  c.fetchUsername(ctx, cookie),
+		Buyers:    buyers,
+		Addresses: addresses,
+	}, nil
+}
+
+func (c *Client) CheckTicketStatus(ctx context.Context, task model.Task, cookie string) (model.TicketOption, bool, error) {
+	project, err := c.FetchProject(ctx, strconv.FormatInt(task.ProjectID, 10), cookie)
+	if err != nil {
+		return model.TicketOption{}, false, err
+	}
+	for _, option := range project.TicketOptions {
+		if option.ProjectID != task.ProjectID || option.ScreenID != task.ScreenID || option.SKUID != task.SKUID {
+			continue
+		}
+		if task.LinkID > 0 && option.LinkID != task.LinkID {
+			continue
+		}
+		return option, isTicketOptionAvailable(option), nil
+	}
+	return model.TicketOption{}, false, errors.New("未在最新票务信息中找到任务票档")
+}
+
+func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie string) (OrderPrepareResult, error) {
+	payload := map[string]any{
+		"count":      task.Quantity,
+		"screen_id":  task.ScreenID,
+		"order_type": firstPositiveInt(int64(task.OrderType), 1),
+		"project_id": task.ProjectID,
+		"sku_id":     task.SKUID,
+		"token":      "",
+		"newRisk":    true,
+	}
+	var response map[string]any
+	endpoint := fmt.Sprintf("%s/api/ticket/order/prepare?project_id=%d", c.showBaseURL, task.ProjectID)
+	if err := c.doJSON(ctx, http.MethodPost, endpoint, payload, cookie, nil, &response); err != nil {
+		return OrderPrepareResult{}, err
+	}
+	code, _ := optionalCode(response)
+	if code != 0 {
+		return OrderPrepareResult{Raw: response}, apiError(response, "订单准备失败")
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return OrderPrepareResult{Raw: response}, errors.New("订单准备响应缺少 data")
+	}
+	token := stringValue(data["token"])
+	if token == "" {
+		return OrderPrepareResult{Raw: response}, errors.New("订单准备响应缺少 token")
+	}
+	return OrderPrepareResult{
+		Token:  token,
+		PToken: stringValue(data["ptoken"]),
+		Raw:    response,
+	}, nil
+}
+
+func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string, prepared OrderPrepareResult) (OrderCreateResult, error) {
+	payload, err := buildOrderPayload(task, prepared.Token)
+	if err != nil {
+		return OrderCreateResult{}, err
+	}
+	orderCreateURL := c.showBaseURL + "/api/ticket/order/createV2"
+	endpoint := fmt.Sprintf("%s?project_id=%d", orderCreateURL, task.ProjectID)
+	if prepared.PToken != "" {
+		payload["ptoken"] = prepared.PToken
+		payload["orderCreateUrl"] = orderCreateURL
+		endpoint += "&ptoken=" + url.QueryEscape(prepared.PToken)
+	}
+
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodPost, endpoint, payload, cookie, nil, &response); err != nil {
+		return OrderCreateResult{}, err
+	}
+	code, _ := optionalCode(response)
+	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	data, _ := mapValue(response["data"])
+	result := OrderCreateResult{
+		Code:     code,
+		Message:  message,
+		OrderID:  firstNonEmpty(stringValue(data["orderId"]), stringValue(data["order_id"])),
+		PayMoney: int64Value(data["pay_money"]),
+		Raw:      response,
+	}
+	if !isCreateSuccess(response, code) {
+		return result, apiError(response, "创建订单失败")
+	}
+	return result, nil
+}
+
+func (c *Client) GetPayParam(ctx context.Context, orderID string, cookie string) (PayParamResult, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return PayParamResult{}, errors.New("订单 ID 不能为空")
+	}
+	endpoint := fmt.Sprintf("%s/api/ticket/order/getPayParam?order_id=%s", c.showBaseURL, url.QueryEscape(orderID))
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
+		return PayParamResult{}, err
+	}
+	code, _ := optionalCode(response)
+	if code != 0 {
+		return PayParamResult{Raw: response}, apiError(response, "获取支付参数失败")
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return PayParamResult{Raw: response}, errors.New("支付参数响应缺少 data")
+	}
+	codeURL := stringValue(data["code_url"])
+	if codeURL == "" {
+		return PayParamResult{Raw: response}, errors.New("支付参数响应缺少 code_url")
+	}
+	png, err := qrcode.Encode(codeURL, qrcode.Medium, 256)
+	if err != nil {
+		return PayParamResult{}, err
+	}
+	return PayParamResult{
+		CodeURL:        codeURL,
+		QRImageDataURL: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+		Raw:            response,
+	}, nil
+}
+
+func (c *Client) fetchProjectPayload(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
+	newPayload, newErr := c.fetchProjectPayloadNew(ctx, projectID, cookie)
+	if newErr == nil {
+		return newPayload, nil
+	}
+	oldPayload, oldErr := c.fetchProjectPayloadOld(ctx, projectID, cookie)
+	if oldErr == nil {
+		return oldPayload, nil
+	}
+	return projectPayload{}, fmt.Errorf("获取项目详情失败：新版接口=%v；旧版接口=%v", newErr, oldErr)
+}
+
+func (c *Client) fetchProjectPayloadNew(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
+	var response map[string]any
+	err := c.doJSON(ctx, http.MethodPost, c.mallBaseURL+"/mall-search-items/items_detail/info", map[string]any{
+		"itemsId":             projectID,
+		"itemsDetailPageType": 3,
+	}, cookie, map[string]string{
+		"Origin":  "https://mall.bilibili.com",
+		"Referer": fmt.Sprintf("%s/neul-next/ticket-renovation/detail.html?id=%d&from=pc_ticketlist&noTitleBar=1", c.mallBaseURL, projectID),
+	}, &response)
+	if err != nil {
+		return projectPayload{}, err
+	}
+
+	if boolValue(response["success"]) == false && response["success"] != nil {
+		return projectPayload{}, errors.New(firstNonEmpty(stringValue(response["message"]), stringValue(response["msg"]), "新版项目接口返回失败"))
+	}
+	if code, ok := optionalCode(response); ok && code != 0 {
+		return projectPayload{}, errors.New(firstNonEmpty(stringValue(response["message"]), stringValue(response["msg"]), "新版项目接口返回失败"))
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return projectPayload{}, errors.New("新版项目接口缺少 data")
+	}
+	return normalizeNewProjectPayload(data, projectID)
+}
+
+func (c *Client) fetchProjectPayloadOld(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
+	endpoint := fmt.Sprintf("%s/api/ticket/project/getV2?version=134&id=%d&project_id=%d", c.showBaseURL, projectID, projectID)
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
+		return projectPayload{}, err
+	}
+	if code, ok := optionalCode(response); !ok || code != 0 {
+		return projectPayload{}, errors.New(firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]), "旧版项目接口返回失败"))
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return projectPayload{}, errors.New("旧版项目接口缺少 data")
+	}
+	return normalizeOldProjectPayload(data, projectID)
+}
+
+func (c *Client) fetchScreensByDate(ctx context.Context, projectID int64, date string, cookie string) ([]map[string]any, error) {
+	if strings.TrimSpace(date) == "" {
+		return nil, nil
+	}
+	endpoint := fmt.Sprintf("%s/api/ticket/project/infoByDate?id=%d&date=%s", c.showBaseURL, projectID, url.QueryEscape(date))
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
+		return nil, err
+	}
+	if code, ok := optionalCode(response); ok && code != 0 {
+		return nil, errors.New(firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]), "按日期获取场次失败"))
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return nil, nil
+	}
+	screens, _ := mapSliceValue(data["screen_list"])
+	return screens, nil
+}
+
+func (c *Client) fetchLinkGoods(ctx context.Context, projectID int64, cookie string) []map[string]any {
+	listURL := fmt.Sprintf("%s/api/ticket/linkgoods/list?project_id=%d&page_type=0", c.showBaseURL, projectID)
+	var listResponse map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, listURL, nil, cookie, nil, &listResponse); err != nil {
+		return nil
+	}
+	data, ok := mapValue(listResponse["data"])
+	if !ok {
+		return nil
+	}
+	rawList, ok := anySliceValue(data["list"])
+	if !ok {
+		return nil
+	}
+
+	result := make([]map[string]any, 0)
+	for _, raw := range rawList {
+		item, ok := mapValue(raw)
+		if !ok {
+			continue
+		}
+		linkID := int64Value(item["id"])
+		if linkID <= 0 {
+			continue
+		}
+
+		detailURL := fmt.Sprintf("%s/api/ticket/linkgoods/detail?link_id=%d", c.showBaseURL, linkID)
+		var detailResponse map[string]any
+		if err := c.doJSON(ctx, http.MethodGet, detailURL, nil, cookie, nil, &detailResponse); err != nil {
+			continue
+		}
+		detailData, ok := mapValue(detailResponse["data"])
+		if !ok {
+			continue
+		}
+		itemID := int64Value(detailData["item_id"])
+		specs, ok := mapSliceValue(detailData["specs_list"])
+		if !ok {
+			continue
+		}
+		for _, spec := range specs {
+			spec["project_id"] = itemID
+			spec["link_id"] = linkID
+			result = append(result, spec)
+		}
+	}
+	return result
+}
+
+func (c *Client) fetchUsername(ctx context.Context, cookie string) string {
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, c.apiBaseURL+"/x/web-interface/nav", nil, cookie, map[string]string{
+		"Referer": showReferer,
+	}, &response); err != nil {
+		return ""
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return ""
+	}
+	return stringValue(data["uname"])
+}
+
+func (c *Client) fetchBuyers(ctx context.Context, projectID int64, cookie string) ([]model.TicketBuyer, error) {
+	endpoint := fmt.Sprintf("%s/api/ticket/buyer/list?is_default&projectId=%d", c.showBaseURL, projectID)
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
+		return nil, err
+	}
+	code, _ := optionalCode(response)
+	if code != 0 {
+		return nil, apiError(response, "获取购票人失败")
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return nil, nil
+	}
+	items, ok := mapSliceValue(data["list"])
+	if !ok {
+		return nil, nil
+	}
+	buyers := make([]model.TicketBuyer, 0, len(items))
+	for _, item := range items {
+		buyers = append(buyers, normalizeBuyer(item))
+	}
+	return buyers, nil
+}
+
+func (c *Client) fetchAddresses(ctx context.Context, cookie string) ([]model.TicketAddress, error) {
+	endpoint := fmt.Sprintf("%s/api/ticket/addr/list", c.showBaseURL)
+	var response map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
+		return nil, err
+	}
+	code, _ := optionalCode(response)
+	if code != 0 {
+		return nil, apiError(response, "获取收货地址失败")
+	}
+	data, ok := mapValue(response["data"])
+	if !ok {
+		return nil, nil
+	}
+	items, ok := mapSliceValue(data["addr_list"])
+	if !ok {
+		return nil, nil
+	}
+	addresses := make([]model.TicketAddress, 0, len(items))
+	for _, item := range items {
+		addresses = append(addresses, normalizeAddress(item))
+	}
+	return addresses, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, method string, endpoint string, body any, cookie string, headers map[string]string, target any) error {
+	var reader io.Reader
+	if body != nil {
+		buffer := &bytes.Buffer{}
+		if err := json.NewEncoder(buffer).Encode(body); err != nil {
+			return err
+		}
+		reader = buffer
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Referer", showReferer)
+	req.Header.Set("User-Agent", ticketUserAgent)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Bilibili 接口返回状态码 %d", resp.StatusCode)
+	}
+
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+
+	if payload, ok := target.(*map[string]any); ok {
+		if stringValue((*payload)["msg"]) == "请先登录" {
+			return errors.New("当前账号未登录，请先验证或重新登录")
+		}
+	}
+	return nil
+}
+
+func normalizeNewProjectPayload(data map[string]any, fallbackProjectID int64) (projectPayload, error) {
+	rawScreens, ok := mapSliceValue(data["screenList"])
+	if !ok || len(rawScreens) == 0 {
+		return projectPayload{}, errors.New("新版项目接口缺少 screenList")
+	}
+
+	projectID := firstPositiveInt(int64Value(data["projectId"]), int64Value(data["itemsId"]), fallbackProjectID)
+	screenStartTimes := make([]int64, 0, len(rawScreens))
+	hasDeliveryFee := false
+	for _, screen := range rawScreens {
+		screen["project_id"] = firstPositiveInt(int64Value(screen["project_id"]), projectID)
+		if int64Value(screen["start_time"]) > 0 {
+			screenStartTimes = append(screenStartTimes, int64Value(screen["start_time"]))
+		}
+		if int64Value(screen["express_fee"]) > 0 {
+			hasDeliveryFee = true
+		}
+		if tickets, ok := mapSliceValue(screen["ticket_list"]); ok {
+			for _, ticket := range tickets {
+				ticket["project_id"] = firstPositiveInt(int64Value(ticket["project_id"]), projectID)
+				ticket["screen_name"] = firstNonEmpty(stringValue(ticket["screen_name"]), stringValue(screen["name"]))
+				if saleFlag, ok := mapValue(ticket["sale_flag"]); ok && int64Value(ticket["sale_flag_number"]) == 0 {
+					ticket["sale_flag_number"] = int64Value(saleFlag["number"])
+				}
+			}
+		}
+	}
+
+	venue, _ := mapValue(data["skuVenueInfo"])
+	startTime := minPositive(screenStartTimes)
+	endTime := firstPositiveInt(int64Value(data["endTime"]), maxPositive(screenStartTimes))
+	return projectPayload{
+		ID:         projectID,
+		Name:       stringValue(data["projectName"]),
+		HotProject: boolValue(data["hotProject"]),
+		HasETicket: !hasDeliveryFee,
+		ScreenList: rawScreens,
+		SalesDates: extractSalesDates(data["salesDates"]),
+		VenueName:  stringValue(venue["name"]),
+		VenueAddr:  stringValue(venue["address_detail"]),
+		StartTime:  startTime,
+		EndTime:    endTime,
+	}, nil
+}
+
+func normalizeOldProjectPayload(data map[string]any, fallbackProjectID int64) (projectPayload, error) {
+	rawScreens, ok := mapSliceValue(data["screen_list"])
+	if !ok {
+		return projectPayload{}, errors.New("旧版项目接口缺少 screen_list")
+	}
+	projectID := firstPositiveInt(int64Value(data["id"]), fallbackProjectID)
+	venue, _ := mapValue(data["venue_info"])
+	for _, screen := range rawScreens {
+		screen["project_id"] = firstPositiveInt(int64Value(screen["project_id"]), projectID)
+	}
+	return projectPayload{
+		ID:         projectID,
+		Name:       stringValue(data["name"]),
+		HotProject: boolValue(data["hotProject"]),
+		HasETicket: boolValue(data["has_eticket"]),
+		ScreenList: rawScreens,
+		SalesDates: extractSalesDates(data["sales_dates"]),
+		VenueName:  stringValue(venue["name"]),
+		VenueAddr:  stringValue(venue["address_detail"]),
+		StartTime:  int64Value(data["start_time"]),
+		EndTime:    int64Value(data["end_time"]),
+	}, nil
+}
+
+func buildTicketOptions(payload projectPayload, screens []map[string]any) []model.TicketOption {
+	options := make([]model.TicketOption, 0)
+	seen := map[string]struct{}{}
+	for _, screen := range screens {
+		screenName := stringValue(screen["name"])
+		if screenName == "" {
+			continue
+		}
+		screenID := int64Value(screen["id"])
+		currentProjectID := firstPositiveInt(int64Value(screen["project_id"]), payload.ID)
+		expressFee := int64(0)
+		if !payload.HasETicket {
+			expressFee = maxInt64(int64Value(screen["express_fee"]), 0)
+		}
+		tickets, ok := mapSliceValue(screen["ticket_list"])
+		if !ok {
+			continue
+		}
+		for _, ticket := range tickets {
+			skuID := int64Value(ticket["id"])
+			ticketLevel := stringValue(ticket["desc"])
+			price := int64Value(ticket["price"]) + expressFee
+			saleStatus := formatSaleStatus(ticket)
+			saleStart := stringValue(ticket["sale_start"])
+			linkID := int64Value(screen["link_id"])
+			value := fmt.Sprintf("%d:%d:%d:%d", currentProjectID, screenID, skuID, linkID)
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			priceText := formatPrice(price)
+			display := fmt.Sprintf("%s - %s - %s - %s - 【起售时间：%s】", screenName, ticketLevel, priceText, saleStatus, saleStart)
+			options = append(options, model.TicketOption{
+				Value:        value,
+				Display:      display,
+				ProjectID:    currentProjectID,
+				ScreenID:     screenID,
+				SKUID:        skuID,
+				ScreenName:   screenName,
+				TicketLevel:  ticketLevel,
+				Price:        price,
+				PriceText:    priceText,
+				SaleStatus:   saleStatus,
+				SaleStart:    saleStart,
+				IsHotProject: payload.HotProject,
+				LinkID:       linkID,
+			})
+		}
+	}
+	sort.SliceStable(options, func(i, j int) bool {
+		if options[i].ScreenName == options[j].ScreenName {
+			return options[i].Price < options[j].Price
+		}
+		return options[i].ScreenName < options[j].ScreenName
+	})
+	return options
+}
+
+func isTicketOptionAvailable(option model.TicketOption) bool {
+	switch strings.TrimSpace(option.SaleStatus) {
+	case "可购买", "库存紧张", "预售":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeBuyer(raw map[string]any) model.TicketBuyer {
+	return model.TicketBuyer{
+		ID:         int64Value(firstPresent(raw, "id", "uid", "buyer_id")),
+		Name:       stringValue(raw["name"]),
+		PersonalID: firstNonEmpty(stringValue(raw["personal_id"]), stringValue(raw["personalId"])),
+		Tel:        firstNonEmpty(stringValue(raw["tel"]), stringValue(raw["phone"])),
+		Raw:        cloneMap(raw),
+	}
+}
+
+func normalizeAddress(raw map[string]any) model.TicketAddress {
+	address := model.TicketAddress{
+		ID:    int64Value(raw["id"]),
+		Name:  stringValue(raw["name"]),
+		Phone: stringValue(raw["phone"]),
+		Prov:  stringValue(raw["prov"]),
+		City:  stringValue(raw["city"]),
+		Area:  stringValue(raw["area"]),
+		Addr:  stringValue(raw["addr"]),
+		Raw:   cloneMap(raw),
+	}
+	address.FullAddress = address.Prov + address.City + address.Area + address.Addr
+	return address
+}
+
+func buildOrderPayload(task model.Task, token string) (map[string]any, error) {
+	buyerInfo, err := json.Marshal(orderBuyers(task.BuyerInfo))
+	if err != nil {
+		return nil, err
+	}
+	deliverInfo, err := json.Marshal(orderDeliver(task.DeliverInfo))
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"again":        1,
+		"count":        task.Quantity,
+		"screen_id":    task.ScreenID,
+		"project_id":   task.ProjectID,
+		"sku_id":       task.SKUID,
+		"order_type":   firstPositiveInt(int64(task.OrderType), 1),
+		"pay_money":    task.PayMoney,
+		"buyer_info":   string(buyerInfo),
+		"buyer":        task.Buyer,
+		"tel":          task.Tel,
+		"deliver_info": string(deliverInfo),
+		"phone":        task.Phone,
+		"token":        token,
+		"timestamp":    time.Now().Unix() * 1000,
+	}
+	if task.LinkID > 0 {
+		payload["link_id"] = task.LinkID
+	}
+	return payload, nil
+}
+
+func orderBuyers(buyers []model.TicketBuyer) []map[string]any {
+	result := make([]map[string]any, 0, len(buyers))
+	for _, buyer := range buyers {
+		item := map[string]any{}
+		if buyer.Raw != nil {
+			item = cloneMap(buyer.Raw)
+		}
+		item["name"] = buyer.Name
+		item["personal_id"] = buyer.PersonalID
+		if buyer.ID > 0 {
+			item["id"] = buyer.ID
+		}
+		if buyer.Tel != "" {
+			item["tel"] = buyer.Tel
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func orderDeliver(address *model.TicketAddress) map[string]any {
+	if address == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"name":    address.Name,
+		"tel":     address.Phone,
+		"addr_id": address.ID,
+		"addr":    firstNonEmpty(address.FullAddress, address.Prov+address.City+address.Area+address.Addr),
+	}
+}
+
+func isCreateSuccess(response map[string]any, code int64) bool {
+	if code == 100048 || code == 100079 {
+		return true
+	}
+	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	return code == 0 && !strings.Contains(message, "defaultBBR")
+}
+
+func apiError(response map[string]any, fallback string) error {
+	code, _ := optionalCode(response)
+	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]), fallback)
+	if code != 0 {
+		return fmt.Errorf("[%d] %s", code, message)
+	}
+	return errors.New(message)
+}
+
+func formatSaleStatus(ticket map[string]any) string {
+	if saleFlagNumber := int64Value(ticket["sale_flag_number"]); saleFlagNumber != 0 {
+		if text, ok := saleFlagNumberMap[saleFlagNumber]; ok {
+			return text
+		}
+	}
+	if clickable, ok := ticket["clickable"].(bool); ok {
+		if clickable {
+			return "可购买"
+		}
+		return "不可购买"
+	}
+	return "未知状态"
+}
+
+func firstPresent(values map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := values[key]; ok && value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func extractSalesDates(raw any) []string {
+	items, ok := anySliceValue(raw)
+	if !ok {
+		return nil
+	}
+	dates := make([]string, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		date := ""
+		if itemMap, ok := mapValue(item); ok {
+			date = stringValue(itemMap["date"])
+		} else {
+			date = stringValue(item)
+		}
+		date = strings.TrimSpace(date)
+		if date == "" {
+			continue
+		}
+		if _, exists := seen[date]; exists {
+			continue
+		}
+		seen[date] = struct{}{}
+		dates = append(dates, date)
+	}
+	return dates
+}
+
+func copyScreens(screens []map[string]any) []map[string]any {
+	copied := make([]map[string]any, 0, len(screens))
+	for _, screen := range screens {
+		copied = append(copied, cloneMap(screen))
+	}
+	return copied
+}
+
+func mergeScreensByID(base []map[string]any, extra []map[string]any) []map[string]any {
+	merged := copyScreens(base)
+	seen := map[int64]struct{}{}
+	for _, screen := range merged {
+		id := int64Value(screen["id"])
+		if id > 0 {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, screen := range extra {
+		id := int64Value(screen["id"])
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, cloneMap(screen))
+	}
+	return merged
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		if nested, ok := mapValue(value); ok {
+			output[key] = cloneMap(nested)
+			continue
+		}
+		if nestedList, ok := anySliceValue(value); ok {
+			list := make([]any, 0, len(nestedList))
+			for _, item := range nestedList {
+				if itemMap, ok := mapValue(item); ok {
+					list = append(list, cloneMap(itemMap))
+				} else {
+					list = append(list, item)
+				}
+			}
+			output[key] = list
+			continue
+		}
+		output[key] = value
+	}
+	return output
+}
+
+func optionalCode(payload map[string]any) (int64, bool) {
+	if _, ok := payload["code"]; ok {
+		return int64Value(payload["code"]), true
+	}
+	if _, ok := payload["errno"]; ok {
+		return int64Value(payload["errno"]), true
+	}
+	return 0, false
+}
+
+func mapValue(value any) (map[string]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	result, ok := value.(map[string]any)
+	return result, ok
+}
+
+func anySliceValue(value any) ([]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	result, ok := value.([]any)
+	return result, ok
+}
+
+func mapSliceValue(value any) ([]map[string]any, bool) {
+	items, ok := anySliceValue(value)
+	if !ok {
+		return nil, false
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		itemMap, ok := mapValue(item)
+		if !ok {
+			continue
+		}
+		result = append(result, itemMap)
+	}
+	return result, true
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return typed.String()
+	case float64:
+		if typed == float64(int64(typed)) {
+			return strconv.FormatInt(int64(typed), 10)
+		}
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	default:
+		return ""
+	}
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case json.Number:
+		num, _ := typed.Int64()
+		return num != 0
+	case float64:
+		return typed != 0
+	case string:
+		return typed == "true" || typed == "1"
+	default:
+		return false
+	}
+}
+
+func int64Value(value any) int64 {
+	switch typed := value.(type) {
+	case json.Number:
+		num, _ := typed.Int64()
+		return num
+	case float64:
+		return int64(typed)
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case string:
+		num, _ := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return num
+	default:
+		return 0
+	}
+}
+
+func firstPositiveInt(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func minPositive(values []int64) int64 {
+	min := int64(0)
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if min == 0 || value < min {
+			min = value
+		}
+	}
+	return min
+}
+
+func maxPositive(values []int64) int64 {
+	max := int64(0)
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
+	}
+	return max
+}
+
+func maxInt64(left int64, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func formatUnix(timestamp int64) string {
+	if timestamp <= 0 {
+		return ""
+	}
+	if timestamp > 1_000_000_000_000 {
+		timestamp /= 1000
+	}
+	return time.Unix(timestamp, 0).Format("2006-01-02 15:04:05")
+}
+
+func formatPrice(price int64) string {
+	return fmt.Sprintf("￥%s", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", float64(price)/100), "0"), "."))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
