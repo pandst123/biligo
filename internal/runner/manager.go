@@ -32,6 +32,8 @@ type Manager struct {
 const (
 	saleStartWaitTick           = time.Microsecond * 50
 	saleStartWaitReportInterval = time.Second
+	saleStartWarmupBefore       = 30 * time.Second
+	saleStartWarmupRequestCount = 5
 )
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
@@ -307,6 +309,7 @@ func (m *Manager) wait(ctx context.Context, duration time.Duration) bool {
 
 func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration) bool {
 	nextReportAt := time.Now().Add(saleStartWaitReportInterval)
+	warmedUp := false
 	for {
 		remaining := saleStart.Sub(nowWithOffset(timeOffset))
 		if remaining <= 0 {
@@ -314,6 +317,10 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 		}
 		if ctx.Err() != nil {
 			return false
+		}
+		if !warmedUp && remaining <= saleStartWarmupBefore {
+			warmedUp = true
+			m.warmupShow(ctx, taskID)
 		}
 		now := time.Now()
 		if !now.Before(nextReportAt) {
@@ -328,6 +335,20 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 			return false
 		}
 	}
+}
+
+// 预热连接
+func (m *Manager) warmupShow(ctx context.Context, taskID int64) {
+	if m.ticket == nil {
+		return
+	}
+	message := fmt.Sprintf("距离起售不足 %d 秒，开始预热抢票连接。", int(saleStartWarmupBefore.Seconds()))
+	m.setRuntime(taskID, "waiting_start", message, "info")
+	if err := m.ticket.WarmupShow(ctx, saleStartWarmupRequestCount); err != nil {
+		m.setRuntime(taskID, "waiting_start", "预热抢票连接失败："+err.Error(), "warn")
+		return
+	}
+	m.setRuntime(taskID, "waiting_start", fmt.Sprintf("预热完成，已发送 %d 个 HEAD 请求。", saleStartWarmupRequestCount), "info")
 }
 
 func (m *Manager) syncTaskTime(ctx context.Context, task model.Task) (model.Task, error) {

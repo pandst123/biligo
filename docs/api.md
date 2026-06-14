@@ -615,7 +615,7 @@
 
 ### POST `/api/tasks/{id}/dispatch`
 
-下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口；运行中的接口错误会按 `pollIntervalSeconds` 继续重试，成功后进入 `waiting_payment`。
+下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 2 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口；运行中的接口错误会按 `pollIntervalSeconds` 继续重试，成功后进入 `waiting_payment`。
 
 响应：
 

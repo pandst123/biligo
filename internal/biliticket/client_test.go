@@ -3,9 +3,11 @@ package biliticket
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -118,6 +120,66 @@ func TestCreateV2StatusMessageHints(t *testing.T) {
 func TestDefaultBBRIsRetryableCreateWarning(t *testing.T) {
 	if isCreateSuccess(map[string]any{"message": "defaultBBR"}, 0) {
 		t.Fatal("defaultBBR should be treated as a retryable create warning")
+	}
+}
+
+func TestWarmupShowSendsHeadRequests(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodHead {
+			t.Fatalf("method = %s, want HEAD", r.Method)
+		}
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	if err := client.WarmupShow(context.Background(), 5); err != nil {
+		t.Fatalf("WarmupShow: %v", err)
+	}
+	if calls != 5 {
+		t.Fatalf("calls = %d, want 5", calls)
+	}
+}
+
+func TestWarmupShowKeepsConnectionForNextRequest(t *testing.T) {
+	var newConnections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			if r.Method != http.MethodHead {
+				t.Fatalf("method = %s, want HEAD", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/ticket/order/prepare":
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	if err := client.WarmupShow(context.Background(), "", 2); err != nil {
+		t.Fatalf("WarmupShow: %v", err)
+	}
+	var response map[string]any
+	endpoint := server.URL + "/api/ticket/order/prepare?project_id=1001701"
+	if err := client.doJSON(context.Background(), http.MethodPost, endpoint, map[string]any{"project_id": 1001701}, "", nil, &response); err != nil {
+		t.Fatalf("doJSON: %v", err)
+	}
+	if newConnections.Load() != 1 {
+		t.Fatalf("new connections = %d, want 1", newConnections.Load())
 	}
 }
 

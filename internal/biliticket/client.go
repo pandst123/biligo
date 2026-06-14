@@ -89,13 +89,25 @@ type projectPayload struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = newKeepAliveHTTPClient()
 	}
 	return &Client{
 		httpClient:  httpClient,
 		showBaseURL: defaultShowBaseURL,
 		mallBaseURL: defaultMallBaseURL,
 		apiBaseURL:  defaultAPIBaseURL,
+	}
+}
+
+func newKeepAliveHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = false
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 20
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
 	}
 }
 
@@ -243,6 +255,23 @@ func (c *Client) CheckTicketStatus(ctx context.Context, task model.Task, cookie 
 		return option, isTicketOptionAvailable(option), nil
 	}
 	return model.TicketOption{}, false, errors.New("未在最新票务信息中找到任务票档")
+}
+
+func (c *Client) WarmupShow(ctx context.Context, count int) error {
+	if count <= 0 {
+		count = 1
+	}
+	endpoint := c.showBaseURL
+	errs := make([]string, 0)
+	for i := 0; i < count; i++ {
+		if err := c.doHead(ctx, endpoint); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("预热 keep-alive 连接失败：%s", strings.Join(errs, ";"))
+	}
+	return nil
 }
 
 func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie string) (OrderPrepareResult, error) {
@@ -564,7 +593,7 @@ func (c *Client) doJSON(ctx context.Context, method string, endpoint string, bod
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("Bilibili 接口返回状态码 %d", resp.StatusCode)
@@ -582,6 +611,35 @@ func (c *Client) doJSON(ctx context.Context, method string, endpoint string, bod
 		}
 	}
 	return nil
+}
+
+func (c *Client) doHead(ctx context.Context, endpoint string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Referer", showReferer)
+	req.Header.Set("User-Agent", ticketUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer drainAndClose(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return fmt.Errorf("HEAD %s 返回状态码 %d", endpoint, resp.StatusCode)
+	}
+	return nil
+}
+
+func drainAndClose(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, body)
+	_ = body.Close()
 }
 
 func normalizeNewProjectPayload(data map[string]any, fallbackProjectID int64) (projectPayload, error) {

@@ -74,7 +74,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0) {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, "") {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -145,6 +145,46 @@ func TestRunnerStartsOrderFlowWithoutTicketStatusCheck(t *testing.T) {
 	}
 	if statusCalls.Load() != 0 {
 		t.Fatalf("ticket status calls = %d, want 0", statusCalls.Load())
+	}
+}
+
+func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
+	var headCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			if r.Method != http.MethodHead {
+				t.Fatalf("warmup method = %s, want HEAD", r.Method)
+			}
+			headCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTaskAt(t, time.Now().Add(2*time.Second))
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	if headCalls.Load() != saleStartWarmupRequestCount {
+		t.Fatalf("HEAD calls = %d, want %d", headCalls.Load(), saleStartWarmupRequestCount)
 	}
 }
 
@@ -329,6 +369,11 @@ func TestRunnerRetriesPayParamErrorsWithoutRecreatingOrder(t *testing.T) {
 
 func createRunnableTask(t *testing.T) (*store.Store, model.Task) {
 	t.Helper()
+	return createRunnableTaskAt(t, time.Now().Add(-time.Second))
+}
+
+func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, model.Task) {
+	t.Helper()
 
 	taskStore, err := store.Open(":memory:")
 	if err != nil {
@@ -353,14 +398,14 @@ func createRunnableTask(t *testing.T) (*store.Store, model.Task) {
 		TicketLevel:         "VIP",
 		TicketDisplay:       "晚场 - VIP",
 		TicketPrice:         68000,
-		SaleStart:           time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+		SaleStart:           saleStart.Format("2006-01-02 15:04:05"),
 		SaleStatus:          "未开始",
 		OrderType:           1,
 		BuyerInfo:           []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
 		Buyer:               "张三",
 		Tel:                 "13800000000",
 		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
-		EndAt:               time.Now().Add(10 * time.Second).Format(time.RFC3339),
+		EndAt:               saleStart.Add(10 * time.Second).Format(time.RFC3339),
 		PollIntervalSeconds: 1,
 	})
 	if err != nil {
