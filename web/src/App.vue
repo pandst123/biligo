@@ -22,9 +22,9 @@ type SectionKey = 'accounts' | 'taskConfig' | 'taskStatus'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 
 const sections: Array<{ key: SectionKey; label: string }> = [
-  { key: 'accounts', label: 'Bilibili账号管理' },
-  { key: 'taskConfig', label: '任务配置及下发' },
-  { key: 'taskStatus', label: '任务状态及管理' },
+  { key: 'accounts', label: '哔哩哔哩账号管理' },
+  { key: 'taskConfig', label: '任务配置' },
+  { key: 'taskStatus', label: '任务管理' },
 ]
 
 const activeSection = ref<SectionKey>('accounts')
