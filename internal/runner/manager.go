@@ -30,7 +30,7 @@ type Manager struct {
 }
 
 const (
-	saleStartWaitTick           = time.Microsecond * 50
+	saleStartWaitTick           = time.Millisecond * 50 // 等待 50 ms
 	saleStartWaitReportInterval = time.Second
 	saleStartWarmupBefore       = 30 * time.Second
 	saleStartWarmupRequestCount = 5
