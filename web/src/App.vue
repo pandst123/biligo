@@ -190,12 +190,22 @@ async function refreshAccountsAndSession() {
   session.value = sessionData
 }
 
-function editAccount(account: Account) {
+async function editAccount(account: Account) {
   editingAccountId.value = account.id
   accountForm.name = account.name
   accountForm.cookie = ''
   accountForm.note = account.note
   activeSection.value = 'accounts'
+  if (!account.hasCookie) {
+    return
+  }
+  const accountId = account.id
+  await run(async () => {
+    const result = await api.getAccountCookie(accountId)
+    if (editingAccountId.value === accountId) {
+      accountForm.cookie = result.cookie
+    }
+  }, '账号 Cookie 已载入')
 }
 
 async function startQRLogin() {
