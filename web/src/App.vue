@@ -107,6 +107,9 @@ let eventSource: EventSource | null = null
 let clockTimer: number | undefined
 
 const selectedTask = computed(() => tasks.value.find((task) => task.id === selectedTaskId.value))
+const selectedTaskTicketSubtitle = computed(() =>
+  selectedTask.value ? taskTicketSummary(selectedTask.value) : '',
+)
 const selectedTicketOption = computed(() =>
   ticketOptions.value.find((ticket) => ticket.value === selectedTicketValue.value),
 )
@@ -610,6 +613,19 @@ function buyerLabel(buyer: TicketBuyer) {
   return `${buyer.name || '未命名购票人'}${buyer.personalId ? ` - ${buyer.personalId}` : ''}`
 }
 
+function taskBuyerSummary(task: Task) {
+  const buyers = task.buyerInfo ?? []
+  if (buyers.length === 0) {
+    return '实名购票人：-'
+  }
+  return `实名购票人：${buyers.map((buyer) => buyerLabel(buyer)).join('、')}`
+}
+
+function taskTicketSummary(task: Task) {
+  const display = task.ticketDisplay || `${task.sessionName || '-'} / ${task.ticketLevel || '-'}`
+  return `${display} / ${task.quantity} 张`
+}
+
 function addressLabel(address: TicketAddress) {
   return `${address.name || '未命名地址'} - ${address.phone || '-'} - ${address.fullAddress || address.addr || '-'}`
 }
@@ -699,12 +715,20 @@ async function dispatchTask(id: number) {
   }, '任务已下发')
 }
 
-async function pauseTask(id: number) {
+async function startTask(id: number) {
+  await run(async () => {
+    await api.dispatchTask(id)
+    tasks.value = await api.listTasks()
+    logs.value = await api.listLogs(selectedTaskId.value ?? undefined)
+  }, '任务已启动')
+}
+
+async function stopTask(id: number) {
   await run(async () => {
     await api.pauseTask(id)
     tasks.value = await api.listTasks()
     logs.value = await api.listLogs(selectedTaskId.value ?? undefined)
-  }, '任务已暂停')
+  }, '任务已停止')
 }
 
 async function deleteTask(id: number) {
@@ -841,7 +865,7 @@ function statusLabel(status: string) {
     waiting_payment: '待支付',
     succeeded: '已成功',
     duplicate_order: '重复订单',
-    paused: '已暂停',
+    paused: '已停止',
     running: '运行中',
     failed: '失败',
     waiting_user: '等待用户',
@@ -1277,7 +1301,7 @@ onUnmounted(() => {
                 <tr v-for="task in tasks" :key="task.id">
                   <td>
                     <strong>{{ task.name }}</strong>
-                    <small>{{ task.ticketDisplay || '-' }}</small>
+                    <small>{{ taskBuyerSummary(task) }}</small>
                   </td>
                   <td>{{ task.accountName || '-' }}</td>
                   <td><span :class="['status-pill', taskStatusClass(task.status)]">{{ statusLabel(task.status) }}</span></td>
@@ -1295,7 +1319,8 @@ onUnmounted(() => {
                   </td>
                   <td class="table-actions">
                     <button type="button" @click="selectTaskLog(task)">日志</button>
-                    <button type="button" @click="pauseTask(task.id)">暂停</button>
+                    <button type="button" class="primary-button compact" @click="startTask(task.id)">启动</button>
+                    <button type="button" @click="stopTask(task.id)">停止</button>
                     <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
                   </td>
                 </tr>
@@ -1307,7 +1332,10 @@ onUnmounted(() => {
 
         <section class="panel log-panel">
           <div class="panel-heading">
-            <h3>运行日志</h3>
+            <div>
+              <h3>运行日志</h3>
+              <small v-if="selectedTaskTicketSubtitle" class="muted">{{ selectedTaskTicketSubtitle }}</small>
+            </div>
             <button type="button" class="text-button" @click="showAllLogs">全部</button>
           </div>
           <article v-for="log in logs" :key="log.id" class="log-line">

@@ -79,6 +79,23 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	}
 }
 
+func TestPauseTaskUsesStopMessage(t *testing.T) {
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, nil, events.NewHub(), fakeTimeSync{})
+	updated, err := manager.Pause(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if updated.Status != "paused" {
+		t.Fatalf("Status = %q, want paused", updated.Status)
+	}
+	if updated.LastMessage != "任务已停止。" {
+		t.Fatalf("LastMessage = %q, want 任务已停止。", updated.LastMessage)
+	}
+}
+
 func TestFormatRemaining(t *testing.T) {
 	if got := formatRemaining(3661 * time.Second); got != "1小时1分1秒" {
 		t.Fatalf("formatRemaining = %q, want 1小时1分1秒", got)

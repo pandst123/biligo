@@ -116,7 +116,7 @@ func (m *Manager) Pause(ctx context.Context, taskID int64) (model.Task, error) {
 
 	task, log, err := m.store.SetTaskRuntime(ctx, taskID, model.TaskRuntimeUpdate{
 		Status:      "paused",
-		LastMessage: "任务已暂停。",
+		LastMessage: "任务已停止。",
 	}, "warn")
 	if err != nil {
 		return model.Task{}, err

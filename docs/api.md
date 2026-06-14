@@ -521,7 +521,7 @@
 | `waiting_payment` | 已创建订单，等待用户支付 |
 | `succeeded` | 订单接口成功但没有可展示的支付二维码 |
 | `duplicate_order` | 检测到重复订单 |
-| `paused` | 已暂停 |
+| `paused` | 已停止 |
 | `failed` | 任务失败或超时停止 |
 
 ### POST `/api/tasks`
@@ -631,7 +631,7 @@
 
 ### POST `/api/tasks/{id}/pause`
 
-暂停任务。若任务正在运行，会取消后端 goroutine，并写入任务日志。
+停止任务。若任务正在运行，会取消后端 goroutine，并写入任务日志。接口路径保留 `/pause`，用于兼容既有前端调用。
 
 响应：
 
@@ -639,7 +639,7 @@
 {
   "id": 1,
   "status": "paused",
-  "lastMessage": "任务已暂停。"
+  "lastMessage": "任务已停止。"
 }
 ```
 
