@@ -170,7 +170,7 @@ func TestWarmupShowKeepsConnectionForNextRequest(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithBaseURL(server.Client(), server.URL)
-	if err := client.WarmupShow(context.Background(), "", 2); err != nil {
+	if err := client.WarmupShow(context.Background(), 2); err != nil {
 		t.Fatalf("WarmupShow: %v", err)
 	}
 	var response map[string]any

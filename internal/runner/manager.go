@@ -158,9 +158,9 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 	}
 
 	m.setRuntime(taskID, "running", "已到起售时间，开始准备订单。", "info")
-	interval := time.Duration(task.PollIntervalSeconds) * time.Second
+	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
 	if interval <= 0 {
-		interval = 3 * time.Second
+		interval = time.Second
 	}
 
 	for {

@@ -207,7 +207,7 @@ type Task struct {
 	Quantity              int            `json:"quantity"`
 	StartAt               string         `json:"startAt"`
 	EndAt                 string         `json:"endAt"`
-	PollIntervalSeconds   int            `json:"pollIntervalSeconds"`
+	PollIntervalMillis    int            `json:"pollIntervalMillis"`
 	Status                string         `json:"status"`
 	LastMessage           string         `json:"lastMessage"`
 	CreatedAt             string         `json:"createdAt"`
@@ -215,32 +215,32 @@ type Task struct {
 }
 
 type TaskInput struct {
-	Name                string         `json:"name"`
-	AccountID           int64          `json:"accountId"`
-	ProjectID           int64          `json:"projectId"`
-	ProjectName         string         `json:"projectName"`
-	ScreenID            int64          `json:"screenId"`
-	SKUID               int64          `json:"skuId"`
-	SessionName         string         `json:"sessionName"`
-	TicketLevel         string         `json:"ticketLevel"`
-	TicketDisplay       string         `json:"ticketDisplay"`
-	TicketPrice         int64          `json:"ticketPrice"`
-	SaleStart           string         `json:"saleStart"`
-	SaleStatus          string         `json:"saleStatus"`
-	LinkID              int64          `json:"linkId"`
-	IsHotProject        bool           `json:"isHotProject"`
-	OrderType           int            `json:"orderType"`
-	PayMoney            int64          `json:"payMoney"`
-	BuyerInfo           []TicketBuyer  `json:"buyerInfo"`
-	Buyer               string         `json:"buyer"`
-	Tel                 string         `json:"tel"`
-	DeliverInfo         *TicketAddress `json:"deliverInfo,omitempty"`
-	Phone               string         `json:"phone"`
-	TimeSyncStrategy    string         `json:"timeSyncStrategy"`
-	Quantity            int            `json:"quantity"`
-	StartAt             string         `json:"startAt"`
-	EndAt               string         `json:"endAt"`
-	PollIntervalSeconds int            `json:"pollIntervalSeconds"`
+	Name               string         `json:"name"`
+	AccountID          int64          `json:"accountId"`
+	ProjectID          int64          `json:"projectId"`
+	ProjectName        string         `json:"projectName"`
+	ScreenID           int64          `json:"screenId"`
+	SKUID              int64          `json:"skuId"`
+	SessionName        string         `json:"sessionName"`
+	TicketLevel        string         `json:"ticketLevel"`
+	TicketDisplay      string         `json:"ticketDisplay"`
+	TicketPrice        int64          `json:"ticketPrice"`
+	SaleStart          string         `json:"saleStart"`
+	SaleStatus         string         `json:"saleStatus"`
+	LinkID             int64          `json:"linkId"`
+	IsHotProject       bool           `json:"isHotProject"`
+	OrderType          int            `json:"orderType"`
+	PayMoney           int64          `json:"payMoney"`
+	BuyerInfo          []TicketBuyer  `json:"buyerInfo"`
+	Buyer              string         `json:"buyer"`
+	Tel                string         `json:"tel"`
+	DeliverInfo        *TicketAddress `json:"deliverInfo,omitempty"`
+	Phone              string         `json:"phone"`
+	TimeSyncStrategy   string         `json:"timeSyncStrategy"`
+	Quantity           int            `json:"quantity"`
+	StartAt            string         `json:"startAt"`
+	EndAt              string         `json:"endAt"`
+	PollIntervalMillis int            `json:"pollIntervalMillis"`
 }
 
 type TaskLog struct {

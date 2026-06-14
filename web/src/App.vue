@@ -89,7 +89,7 @@ const taskForm = reactive<TaskInput>({
   quantity: 1,
   startAt: '',
   endAt: '',
-  pollIntervalSeconds: 3,
+  pollIntervalMillis: 1000,
 })
 
 const selectedTaskId = ref<number | null>(null)
@@ -122,7 +122,7 @@ const canSaveTask = computed(
     Boolean(taskForm.deliverInfo?.id) &&
     taskForm.buyer.trim() !== '' &&
     taskForm.tel.trim() !== '' &&
-    taskForm.pollIntervalSeconds > 0,
+    taskForm.pollIntervalMillis > 0,
 )
 
 async function run(action: () => Promise<void>, success?: string) {
@@ -384,7 +384,7 @@ function resetTaskForm() {
     quantity: 1,
     startAt: '',
     endAt: '',
-    pollIntervalSeconds: 3,
+    pollIntervalMillis: 1000,
   })
 }
 
@@ -416,7 +416,7 @@ function editTask(task: Task) {
     quantity: task.quantity,
     startAt: task.startAt,
     endAt: task.endAt,
-    pollIntervalSeconds: task.pollIntervalSeconds,
+    pollIntervalMillis: task.pollIntervalMillis || 1000,
   })
   restoreTicketSelectionFromTask(task)
   activeSection.value = 'taskConfig'
@@ -1198,8 +1198,8 @@ onUnmounted(() => {
           </div>
           <div class="form-row">
             <label>
-              <span>轮询间隔 <span class="required-mark">*</span></span>
-              <input v-model.number="taskForm.pollIntervalSeconds" min="1" type="number" />
+              <span>重试间隔（ms） <span class="required-mark">*</span></span>
+              <input v-model.number="taskForm.pollIntervalMillis" min="1" type="number" placeholder="例如：1000" />
             </label>
             <label>
               时间同步策略

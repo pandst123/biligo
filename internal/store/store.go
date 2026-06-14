@@ -95,7 +95,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			quantity INTEGER NOT NULL DEFAULT 1,
 			start_at TEXT NOT NULL DEFAULT '',
 			end_at TEXT NOT NULL DEFAULT '',
-			poll_interval_seconds INTEGER NOT NULL DEFAULT 3,
+			poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
 			status TEXT NOT NULL DEFAULT 'draft',
 			last_message TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
@@ -141,6 +141,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		"time_sync_strategy":        "TEXT NOT NULL DEFAULT 'bilibili'",
 		"time_offset_ms":            "INTEGER NOT NULL DEFAULT 0",
 		"time_synced_at":            "TEXT NOT NULL DEFAULT ''",
+		"poll_interval_ms":          "INTEGER NOT NULL DEFAULT 1000",
 	}
 	for column, definition := range taskColumns {
 		if err := s.ensureColumn(ctx, "tasks", column, definition); err != nil {
@@ -381,7 +382,7 @@ func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
-			t.poll_interval_seconds, t.status, t.last_message, t.created_at, t.updated_at
+			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
 		ORDER BY t.updated_at DESC, t.id DESC
@@ -421,11 +422,11 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 			sale_start, sale_status, link_id, is_hot_project,
 			order_type, pay_money, buyer_info, buyer, tel, deliver_info, phone,
 			time_sync_strategy,
-			quantity, start_at, end_at, poll_interval_seconds,
+			quantity, start_at, end_at, poll_interval_ms,
 			status, last_message, created_at, updated_at
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, now)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -452,7 +453,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
-			t.poll_interval_seconds, t.status, t.last_message, t.created_at, t.updated_at
+			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
 		WHERE t.id = ?
@@ -479,9 +480,9 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 			sale_start = ?, sale_status = ?, link_id = ?, is_hot_project = ?,
 			order_type = ?, pay_money = ?, buyer_info = ?, buyer = ?, tel = ?, deliver_info = ?, phone = ?,
 			time_sync_strategy = ?,
-			quantity = ?, start_at = ?, end_at = ?, poll_interval_seconds = ?, updated_at = ?
+			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -714,7 +715,7 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&task.Quantity,
 		&task.StartAt,
 		&task.EndAt,
-		&task.PollIntervalSeconds,
+		&task.PollIntervalMillis,
 		&task.Status,
 		&task.LastMessage,
 		&task.CreatedAt,
@@ -757,8 +758,8 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	if input.PayMoney <= 0 && input.TicketPrice > 0 {
 		input.PayMoney = input.TicketPrice * int64(input.Quantity)
 	}
-	if input.PollIntervalSeconds <= 0 {
-		input.PollIntervalSeconds = 3
+	if input.PollIntervalMillis <= 0 {
+		input.PollIntervalMillis = 1000
 	}
 	return input
 }

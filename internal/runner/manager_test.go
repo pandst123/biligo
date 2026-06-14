@@ -74,7 +74,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, "") {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0) {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -388,25 +388,25 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 		t.Fatalf("CreateAccountWithStatus: %v", err)
 	}
 	task, err := taskStore.CreateTask(context.Background(), model.TaskInput{
-		Name:                "测试任务",
-		AccountID:           account.ID,
-		ProjectID:           1001701,
-		ProjectName:         "测试项目",
-		ScreenID:            2001,
-		SKUID:               3001,
-		SessionName:         "晚场",
-		TicketLevel:         "VIP",
-		TicketDisplay:       "晚场 - VIP",
-		TicketPrice:         68000,
-		SaleStart:           saleStart.Format("2006-01-02 15:04:05"),
-		SaleStatus:          "未开始",
-		OrderType:           1,
-		BuyerInfo:           []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
-		Buyer:               "张三",
-		Tel:                 "13800000000",
-		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
-		EndAt:               saleStart.Add(10 * time.Second).Format(time.RFC3339),
-		PollIntervalSeconds: 1,
+		Name:               "测试任务",
+		AccountID:          account.ID,
+		ProjectID:          1001701,
+		ProjectName:        "测试项目",
+		ScreenID:           2001,
+		SKUID:              3001,
+		SessionName:        "晚场",
+		TicketLevel:        "VIP",
+		TicketDisplay:      "晚场 - VIP",
+		TicketPrice:        68000,
+		SaleStart:          saleStart.Format("2006-01-02 15:04:05"),
+		SaleStatus:         "未开始",
+		OrderType:          1,
+		BuyerInfo:          []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
+		Buyer:              "张三",
+		Tel:                "13800000000",
+		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
+		EndAt:              saleStart.Add(10 * time.Second).Format(time.RFC3339),
+		PollIntervalMillis: 50,
 	})
 	if err != nil {
 		taskStore.Close()

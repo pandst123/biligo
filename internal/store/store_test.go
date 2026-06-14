@@ -38,7 +38,7 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 			Phone:       "13800000000",
 			FullAddress: "上海市测试路 1 号",
 		},
-		PollIntervalSeconds: 2,
+		PollIntervalMillis: 200,
 	})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
@@ -58,6 +58,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	}
 	if task.TimeSyncStrategy != model.TimeSyncStrategyBilibili {
 		t.Fatalf("TimeSyncStrategy = %q, want %q", task.TimeSyncStrategy, model.TimeSyncStrategyBilibili)
+	}
+	if task.PollIntervalMillis != 200 {
+		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
 	}
 
 	task, log, err := store.SetTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 88, "2026-06-14T10:00:00+08:00", "时间同步完成")

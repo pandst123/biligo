@@ -192,7 +192,7 @@ export interface Task {
   quantity: number
   startAt: string
   endAt: string
-  pollIntervalSeconds: number
+  pollIntervalMillis: number
   status: string
   lastMessage: string
   createdAt: string
@@ -225,7 +225,7 @@ export interface TaskInput {
   quantity: number
   startAt: string
   endAt: string
-  pollIntervalSeconds: number
+  pollIntervalMillis: number
 }
 
 export interface TaskLog {
