@@ -12,12 +12,18 @@ import (
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/fdcs99/biligo/internal/timesync"
 )
 
+type TimeSynchronizer interface {
+	Sync(ctx context.Context) (timesync.Result, error)
+}
+
 type Manager struct {
-	store  *store.Store
-	ticket *biliticket.Client
-	hub    *events.Hub
+	store    *store.Store
+	ticket   *biliticket.Client
+	timeSync TimeSynchronizer
+	hub      *events.Hub
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
@@ -29,11 +35,19 @@ const (
 )
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
+	return NewManagerWithTimeSync(store, ticket, hub, timesync.NewClient(nil))
+}
+
+func NewManagerWithTimeSync(store *store.Store, ticket *biliticket.Client, hub *events.Hub, timeSync TimeSynchronizer) *Manager {
+	if timeSync == nil {
+		timeSync = timesync.NewClient(nil)
+	}
 	return &Manager{
-		store:   store,
-		ticket:  ticket,
-		hub:     hub,
-		running: map[int64]context.CancelFunc{},
+		store:    store,
+		ticket:   ticket,
+		timeSync: timeSync,
+		hub:      hub,
+		running:  map[int64]context.CancelFunc{},
 	}
 }
 
@@ -58,6 +72,11 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 	}
 	if strings.TrimSpace(cookie) == "" {
 		return model.Task{}, errors.New("账号未保存 Cookie")
+	}
+
+	task, err = m.syncTaskTime(ctx, task)
+	if err != nil {
+		return model.Task{}, err
 	}
 
 	m.mu.Lock()
@@ -130,8 +149,9 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 	if parsedEnd, err := parseTaskTime(task.EndAt); err == nil && !parsedEnd.IsZero() {
 		endAt = parsedEnd
 	}
+	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
 
-	if !m.waitUntilSaleStart(ctx, taskID, saleStart) {
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset) {
 		return
 	}
 
@@ -145,7 +165,7 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Now().After(endAt) {
+		if nowWithOffset(timeOffset).After(endAt) {
 			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
 			return
 		}
@@ -267,10 +287,10 @@ func (m *Manager) wait(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time) bool {
+func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration) bool {
 	nextReportAt := time.Now().Add(saleStartWaitReportInterval)
 	for {
-		remaining := time.Until(saleStart)
+		remaining := saleStart.Sub(nowWithOffset(timeOffset))
 		if remaining <= 0 {
 			return true
 		}
@@ -290,6 +310,47 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 			return false
 		}
 	}
+}
+
+func (m *Manager) syncTaskTime(ctx context.Context, task model.Task) (model.Task, error) {
+	strategy := model.NormalizeTimeSyncStrategy(task.TimeSyncStrategy)
+	if strategy == model.TimeSyncStrategyLocal {
+		message := "时间同步策略：本地时间，offset=+0ms。"
+		updated, log, err := m.store.SetTaskTimeSync(ctx, task.ID, strategy, 0, time.Now().Format(time.RFC3339), message)
+		if err == nil {
+			m.publishTaskAndLog(updated, log)
+		}
+		return updated, err
+	}
+
+	result, err := m.timeSync.Sync(ctx)
+	if err != nil {
+		updated, log, setErr := m.store.SetTaskRuntime(ctx, task.ID, model.TaskRuntimeUpdate{
+			Status:      "failed",
+			LastMessage: "时间同步失败：" + err.Error(),
+		}, "error")
+		if setErr == nil {
+			m.publishTaskAndLog(updated, log)
+		}
+		return model.Task{}, err
+	}
+
+	message := fmt.Sprintf(
+		"时间同步完成：哔哩哔哩时间 offset=%+dms，平均RTT=%dms，采样%d次后取中间%d次平均。",
+		result.OffsetMillis,
+		result.AverageRTTMillis,
+		result.TotalSampleCount,
+		result.AveragedSampleCount,
+	)
+	updated, log, err := m.store.SetTaskTimeSync(ctx, task.ID, strategy, result.OffsetMillis, result.SyncedAt.Format(time.RFC3339), message)
+	if err == nil {
+		m.publishTaskAndLog(updated, log)
+	}
+	return updated, err
+}
+
+func nowWithOffset(offset time.Duration) time.Time {
+	return time.Now().Add(offset)
 }
 
 func (m *Manager) remove(taskID int64) {

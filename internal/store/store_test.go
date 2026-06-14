@@ -56,4 +56,18 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.DeliverInfo == nil || task.DeliverInfo.ID != 9 {
 		t.Fatalf("DeliverInfo = %#v, want address id 9", task.DeliverInfo)
 	}
+	if task.TimeSyncStrategy != model.TimeSyncStrategyBilibili {
+		t.Fatalf("TimeSyncStrategy = %q, want %q", task.TimeSyncStrategy, model.TimeSyncStrategyBilibili)
+	}
+
+	task, log, err := store.SetTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 88, "2026-06-14T10:00:00+08:00", "时间同步完成")
+	if err != nil {
+		t.Fatalf("SetTaskTimeSync: %v", err)
+	}
+	if log.ID == 0 {
+		t.Fatal("time sync log was not created")
+	}
+	if task.TimeOffsetMillis != 88 || task.TimeSyncedAt == "" {
+		t.Fatalf("unexpected time sync fields: %#v", task)
+	}
 }

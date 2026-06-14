@@ -138,6 +138,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		"payment_url":               "TEXT NOT NULL DEFAULT ''",
 		"payment_qr_image_data_url": "TEXT NOT NULL DEFAULT ''",
 		"last_checked_at":           "TEXT NOT NULL DEFAULT ''",
+		"time_sync_strategy":        "TEXT NOT NULL DEFAULT 'bilibili'",
+		"time_offset_ms":            "INTEGER NOT NULL DEFAULT 0",
+		"time_synced_at":            "TEXT NOT NULL DEFAULT ''",
 	}
 	for column, definition := range taskColumns {
 		if err := s.ensureColumn(ctx, "tasks", column, definition); err != nil {
@@ -376,6 +379,7 @@ func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 			t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
 			t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
+			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
 			t.poll_interval_seconds, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
@@ -416,11 +420,12 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 			session_name, ticket_level, ticket_display, ticket_price,
 			sale_start, sale_status, link_id, is_hot_project,
 			order_type, pay_money, buyer_info, buyer, tel, deliver_info, phone,
+			time_sync_strategy,
 			quantity, start_at, end_at, poll_interval_seconds,
 			status, last_message, created_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, now)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -445,6 +450,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 			t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
 			t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
+			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
 			t.poll_interval_seconds, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
@@ -472,9 +478,10 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 			session_name = ?, ticket_level = ?, ticket_display = ?, ticket_price = ?,
 			sale_start = ?, sale_status = ?, link_id = ?, is_hot_project = ?,
 			order_type = ?, pay_money = ?, buyer_info = ?, buyer = ?, tel = ?, deliver_info = ?, phone = ?,
+			time_sync_strategy = ?,
 			quantity = ?, start_at = ?, end_at = ?, poll_interval_seconds = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalSeconds, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -523,6 +530,37 @@ func (s *Store) SetTaskRuntime(ctx context.Context, id int64, update model.TaskR
 			return model.Task{}, model.TaskLog{}, err
 		}
 	}
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+	return task, log, nil
+}
+
+func (s *Store) SetTaskTimeSync(ctx context.Context, id int64, strategy string, offsetMillis int64, syncedAt string, message string) (model.Task, model.TaskLog, error) {
+	now := nowText()
+	strategy = model.NormalizeTimeSyncStrategy(strategy)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks
+		SET time_sync_strategy = ?,
+			time_offset_ms = ?,
+			time_synced_at = ?,
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			updated_at = ?
+		WHERE id = ?
+	`, strategy, offsetMillis, strings.TrimSpace(syncedAt), strings.TrimSpace(message), now, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+
+	var log model.TaskLog
+	if strings.TrimSpace(message) != "" {
+		log, err = s.AddTaskLog(ctx, id, "info", message)
+		if err != nil {
+			return model.Task{}, model.TaskLog{}, err
+		}
+	}
+
 	task, err := s.GetTask(ctx, id)
 	if err != nil {
 		return model.Task{}, model.TaskLog{}, err
@@ -642,6 +680,9 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&task.PaymentURL,
 		&task.PaymentQRImageDataURL,
 		&task.LastCheckedAt,
+		&task.TimeSyncStrategy,
+		&task.TimeOffsetMillis,
+		&task.TimeSyncedAt,
 		&task.Quantity,
 		&task.StartAt,
 		&task.EndAt,
@@ -675,6 +716,7 @@ func boolToInt(value bool) int {
 }
 
 func normalizeTaskInput(input model.TaskInput) model.TaskInput {
+	input.TimeSyncStrategy = model.NormalizeTimeSyncStrategy(input.TimeSyncStrategy)
 	if input.OrderType <= 0 {
 		input.OrderType = 1
 	}

@@ -70,6 +70,12 @@ label,
   font-size: 14px;
 }
 
+.field-hint {
+  color: #77736c;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .required-mark {
   color: #a83f3f;
   font-weight: 700;

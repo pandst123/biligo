@@ -496,6 +496,9 @@
     "paymentUrl": "",
     "paymentQrImageDataUrl": "",
     "lastCheckedAt": "",
+    "timeSyncStrategy": "bilibili",
+    "timeOffsetMillis": 0,
+    "timeSyncedAt": "",
     "quantity": 2,
     "startAt": "",
     "endAt": "",
@@ -565,6 +568,7 @@
     "fullAddress": "上海市徐汇区测试路 1 号"
   },
   "phone": "",
+  "timeSyncStrategy": "bilibili",
   "quantity": 2,
   "startAt": "",
   "endAt": "",
@@ -580,7 +584,15 @@
 - `buyerInfo` 非空时，后端将 `quantity` 修正为购票人数。
 - `payMoney <= 0` 且 `ticketPrice > 0` 时，后端按票价乘购票人数补齐。
 - `pollIntervalSeconds <= 0` 时后端默认修正为 `3`。
+- `timeSyncStrategy` 可选值为 `bilibili` 或 `local`，为空时默认 `bilibili`。
 - Web 控制台要求先获取票务信息、选择票信息、购票人和收货地址，再保存任务。
+
+时间同步策略：
+
+| 策略 | 说明 |
+| --- | --- |
+| `bilibili` | 默认值。任务下发时请求 `https://api.live.bilibili.com/xlive/open-interface/v1/rtc/getTimestamp` 5 次，按半个 RTT 修正每次样本，去除最大和最小 offset 后取剩余 3 次平均值。 |
+| `local` | 使用本地机器时间，`timeOffsetMillis` 为 `0`。 |
 
 兼容说明：
 
@@ -604,7 +616,7 @@
 
 ### POST `/api/tasks/{id}/dispatch`
 
-下发任务。后端会启动内置任务运行器，等待票档起售时间，并按 `pollIntervalSeconds` 检测票档状态。检测到可购买后会调用订单准备、订单创建和支付参数接口；成功后进入 `waiting_payment`。
+下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间，并按 `pollIntervalSeconds` 检测票档状态。检测到可购买后会调用订单准备、订单创建和支付参数接口；成功后进入 `waiting_payment`。
 
 响应：
 

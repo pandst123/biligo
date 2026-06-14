@@ -13,7 +13,29 @@ import (
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/fdcs99/biligo/internal/timesync"
 )
+
+type fakeTimeSync struct {
+	result timesync.Result
+	err    error
+}
+
+func (f fakeTimeSync) Sync(context.Context) (timesync.Result, error) {
+	if f.err != nil {
+		return timesync.Result{}, f.err
+	}
+	if f.result.SyncedAt.IsZero() {
+		f.result.SyncedAt = time.Now()
+	}
+	if f.result.TotalSampleCount == 0 {
+		f.result.TotalSampleCount = 5
+	}
+	if f.result.AveragedSampleCount == 0 {
+		f.result.AveragedSampleCount = 3
+	}
+	return f.result, nil
+}
 
 func TestValidateTaskRequiresPurchaseConfig(t *testing.T) {
 	task := model.Task{
@@ -52,7 +74,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour)) {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0) {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -94,7 +116,9 @@ func TestRunnerPollsUntilAvailableAndStoresPayment(t *testing.T) {
 	taskStore, task := createRunnableTask(t)
 	defer taskStore.Close()
 
-	manager := NewManager(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub())
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{
+		result: timesync.Result{OffsetMillis: 123, AverageRTTMillis: 8},
+	})
 	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -108,6 +132,15 @@ func TestRunnerPollsUntilAvailableAndStoresPayment(t *testing.T) {
 	}
 	if updated.PaymentQRImageDataURL == "" {
 		t.Fatal("PaymentQRImageDataURL is empty")
+	}
+	if updated.TimeSyncStrategy != model.TimeSyncStrategyBilibili {
+		t.Fatalf("TimeSyncStrategy = %q, want %q", updated.TimeSyncStrategy, model.TimeSyncStrategyBilibili)
+	}
+	if updated.TimeOffsetMillis != 123 {
+		t.Fatalf("TimeOffsetMillis = %d, want 123", updated.TimeOffsetMillis)
+	}
+	if updated.TimeSyncedAt == "" {
+		t.Fatal("TimeSyncedAt is empty")
 	}
 	if detailCalls.Load() < 2 {
 		t.Fatalf("detail calls = %d, want at least 2", detailCalls.Load())
@@ -133,7 +166,7 @@ func TestRunnerStopsForLoginRequired(t *testing.T) {
 	taskStore, task := createRunnableTask(t)
 	defer taskStore.Close()
 
-	manager := NewManager(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub())
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
 	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}

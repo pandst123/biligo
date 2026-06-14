@@ -186,6 +186,9 @@ export interface Task {
   paymentUrl: string
   paymentQrImageDataUrl: string
   lastCheckedAt: string
+  timeSyncStrategy: string
+  timeOffsetMillis: number
+  timeSyncedAt: string
   quantity: number
   startAt: string
   endAt: string
@@ -218,6 +221,7 @@ export interface TaskInput {
   tel: string
   deliverInfo?: TicketAddress
   phone: string
+  timeSyncStrategy: string
   quantity: number
   startAt: string
   endAt: string

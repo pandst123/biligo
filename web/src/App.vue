@@ -85,6 +85,7 @@ const taskForm = reactive<TaskInput>({
   tel: '',
   deliverInfo: undefined,
   phone: '',
+  timeSyncStrategy: 'bilibili',
   quantity: 1,
   startAt: '',
   endAt: '',
@@ -379,6 +380,7 @@ function resetTaskForm() {
     tel: '',
     deliverInfo: undefined,
     phone: '',
+    timeSyncStrategy: 'bilibili',
     quantity: 1,
     startAt: '',
     endAt: '',
@@ -410,6 +412,7 @@ function editTask(task: Task) {
     tel: task.tel,
     deliverInfo: task.deliverInfo,
     phone: task.phone,
+    timeSyncStrategy: task.timeSyncStrategy || 'bilibili',
     quantity: task.quantity,
     startAt: task.startAt,
     endAt: task.endAt,
@@ -785,7 +788,7 @@ function countdownText(task: Task) {
   if (!target) {
     return '-'
   }
-  const remaining = target.getTime() - nowMs.value
+  const remaining = target.getTime() - calibratedNowMs(task)
   if (remaining <= 0) {
     return '已到起售时间'
   }
@@ -806,6 +809,22 @@ function parseTaskTime(value: string) {
     return null
   }
   return parsed
+}
+
+function calibratedNowMs(task: Task) {
+  return nowMs.value + (task.timeOffsetMillis || 0)
+}
+
+function timeSyncStrategyLabel(strategy: string) {
+  return strategy === 'local' ? '本地时间' : '哔哩哔哩时间'
+}
+
+function timeSyncSummary(task: Task) {
+  if (!task.timeSyncedAt) {
+    return `${timeSyncStrategyLabel(task.timeSyncStrategy)} · 未同步`
+  }
+  const offset = task.timeOffsetMillis || 0
+  return `${timeSyncStrategyLabel(task.timeSyncStrategy)} · offset ${offset >= 0 ? '+' : ''}${offset}ms`
 }
 
 async function copyPaymentUrl(task: Task) {
@@ -1183,10 +1202,20 @@ onUnmounted(() => {
               <input v-model.number="taskForm.pollIntervalSeconds" min="1" type="number" />
             </label>
             <label>
-              订单类型
-              <input :value="taskForm.orderType" disabled />
+              时间同步策略
+              <select v-model="taskForm.timeSyncStrategy">
+                <option value="bilibili">哔哩哔哩时间</option>
+                <option value="local">本地时间</option>
+              </select>
             </label>
           </div>
+          <p class="field-hint">
+            默认在任务下发时请求哔哩哔哩时间接口同步；建议距离开票时间大于 1 分钟时使用，时间过近可切换本地时间。
+          </p>
+          <label>
+            订单类型
+            <input :value="taskForm.orderType" disabled />
+          </label>
           <div class="form-row">
             <label>
               结束时间
@@ -1238,7 +1267,7 @@ onUnmounted(() => {
                   <th>任务</th>
                   <th>账号</th>
                   <th>状态</th>
-                  <th>倒计时</th>
+                  <th>倒计时/时间源</th>
                   <th>最近消息</th>
                   <th>支付</th>
                   <th>操作</th>
@@ -1252,7 +1281,10 @@ onUnmounted(() => {
                   </td>
                   <td>{{ task.accountName || '-' }}</td>
                   <td><span :class="['status-pill', taskStatusClass(task.status)]">{{ statusLabel(task.status) }}</span></td>
-                  <td>{{ countdownText(task) }}</td>
+                  <td>
+                    <strong>{{ countdownText(task) }}</strong>
+                    <small>{{ timeSyncSummary(task) }}</small>
+                  </td>
                   <td>{{ task.lastMessage || '-' }}</td>
                   <td>
                     <div v-if="task.status === 'waiting_payment' && task.paymentUrl" class="payment-cell">

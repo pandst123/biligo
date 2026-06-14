@@ -1,5 +1,12 @@
 package model
 
+import "strings"
+
+const (
+	TimeSyncStrategyBilibili = "bilibili"
+	TimeSyncStrategyLocal    = "local"
+)
+
 type Health struct {
 	Status   string `json:"status"`
 	Database string `json:"database"`
@@ -194,6 +201,9 @@ type Task struct {
 	PaymentURL            string         `json:"paymentUrl"`
 	PaymentQRImageDataURL string         `json:"paymentQrImageDataUrl"`
 	LastCheckedAt         string         `json:"lastCheckedAt"`
+	TimeSyncStrategy      string         `json:"timeSyncStrategy"`
+	TimeOffsetMillis      int64          `json:"timeOffsetMillis"`
+	TimeSyncedAt          string         `json:"timeSyncedAt"`
 	Quantity              int            `json:"quantity"`
 	StartAt               string         `json:"startAt"`
 	EndAt                 string         `json:"endAt"`
@@ -226,6 +236,7 @@ type TaskInput struct {
 	Tel                 string         `json:"tel"`
 	DeliverInfo         *TicketAddress `json:"deliverInfo,omitempty"`
 	Phone               string         `json:"phone"`
+	TimeSyncStrategy    string         `json:"timeSyncStrategy"`
 	Quantity            int            `json:"quantity"`
 	StartAt             string         `json:"startAt"`
 	EndAt               string         `json:"endAt"`
@@ -252,4 +263,13 @@ type TaskRuntimeUpdate struct {
 type EventSnapshot struct {
 	Tasks []Task    `json:"tasks"`
 	Logs  []TaskLog `json:"logs"`
+}
+
+func NormalizeTimeSyncStrategy(strategy string) string {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case TimeSyncStrategyLocal:
+		return TimeSyncStrategyLocal
+	default:
+		return TimeSyncStrategyBilibili
+	}
 }
