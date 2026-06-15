@@ -8,6 +8,28 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 品牌图标接入
+
+类型：界面与资源调整
+
+摘要：接入 Biligo 项目 logo，使用压缩后的 PNG 补齐 README 展示和 Web 标签页图标。
+
+主要变更：
+
+- 新增压缩后的 `assets/logo.png`，作为 README 中展示的项目 logo。
+- 新增 `web/public/favicon.png`，并在 `web/index.html` 中注册为网页图标。
+- 不再保留 ICO 图标文件。
+
+验收情况：
+
+- 已验证 `assets/logo.png` 和 `web/public/favicon.png` 为 512x512 PNG 文件。
+- 已通过 `pnpm build`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 暂无。
+
 ## 2026-06-15 VS Code pnpm 任务完善
 
 类型：开发环境调整

@@ -1,4 +1,9 @@
 # Biligo
+
+<p align="center">
+  <img src="assets/logo.png" alt="Biligo Logo" width="180"/>
+</p>
+
 Biligo 是一个 哔哩哔哩会员购 抢票辅助工具
 
 基于 Go后端API服务 和 Vue3+Element Plus前端服务 构建
