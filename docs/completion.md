@@ -8,6 +8,30 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 切换纯 Go SQLite 驱动
+
+类型：技术调整
+
+摘要：后端数据库驱动从 CGO 依赖的 `go-sqlite3` 切换为纯 Go 的 `modernc.org/sqlite`，为后续单文件跨平台编译降低环境依赖。
+
+主要变更：
+
+- 存储层匿名导入改为 `modernc.org/sqlite`。
+- `database/sql` 打开驱动名从 `sqlite3` 改为 `sqlite`。
+- `go.mod` 移除 `github.com/mattn/go-sqlite3`，新增 `modernc.org/sqlite v1.34.5`。
+- 保持项目 `go 1.22` 指令不变，避免因最新驱动版本抬高本地 Go 版本要求。
+
+验收情况：
+
+- 已通过 `go test ./...`。
+- 已通过 `CGO_ENABLED=0 go test ./...`。
+- 已通过 `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /tmp/biligo-server.exe ./cmd/server`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 后续打包单文件 exe 时仍需把前端静态资源嵌入后端二进制。
+
 ## 2026-06-15 选择票档后默认结束时间
 
 类型：交互优化
