@@ -519,6 +519,7 @@ function clearSelectedTicketFields() {
     linkId: 0,
     isHotProject: false,
     payMoney: 0,
+    endAt: '',
   })
 }
 
@@ -659,6 +660,7 @@ function selectTicketOption() {
     clearSelectedTicketFields()
     return
   }
+  const defaultEndAt = defaultEndAtFromSaleStart(ticket.saleStart)
   Object.assign(taskForm, {
     projectId: ticket.projectId,
     projectName: fetchedTicketProject.value.projectName,
@@ -673,12 +675,30 @@ function selectTicketOption() {
     linkId: ticket.linkId ?? 0,
     isHotProject: ticket.isHotProject,
     payMoney: ticket.price * taskForm.buyerInfo.length,
+    endAt: defaultEndAt,
   })
   if (!taskForm.name.trim()) {
     taskForm.name = [fetchedTicketProject.value.projectName, ticket.screenName, ticket.ticketLevel]
       .filter(Boolean)
       .join(' ')
   }
+}
+
+function defaultEndAtFromSaleStart(saleStart: string) {
+  const parsed = parseTaskTime(saleStart)
+  if (!parsed) {
+    return ''
+  }
+  return formatDateTimeInput(new Date(parsed.getTime() + 10 * 60 * 1000))
+}
+
+function formatDateTimeInput(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function buyerLabel(buyer: TicketBuyer) {
