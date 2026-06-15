@@ -1,5 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
+import {
+  Check,
+  CirclePlus,
+  Close,
+  CopyDocument,
+  Delete,
+  Document,
+  Edit,
+  Menu as MenuIcon,
+  Monitor,
+  Refresh,
+  Search,
+  Setting,
+  SwitchButton,
+  User,
+  VideoPlay,
+  View,
+} from '@element-plus/icons-vue'
 import type {
   Account,
   AccountInput,
@@ -20,6 +39,7 @@ import { API_BASE, api } from './api'
 
 type SectionKey = 'accounts' | 'taskConfig' | 'taskStatus'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
+type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
 
 const sections: Array<{ key: SectionKey; label: string }> = [
   { key: 'accounts', label: '哔哩哔哩账号管理' },
@@ -33,6 +53,7 @@ const error = ref('')
 const notice = ref('')
 const health = ref<Health | null>(null)
 const session = ref<SessionSummary | null>(null)
+const mobileNavOpen = ref(false)
 
 const accounts = ref<Account[]>([])
 const ticketProjectHistories = ref<TicketProjectHistory[]>([])
@@ -188,6 +209,20 @@ async function refreshAccountsAndSession() {
   const [accountData, sessionData] = await Promise.all([api.listAccounts(), api.session()])
   accounts.value = accountData ?? []
   session.value = sessionData
+}
+
+function setActiveSection(section: SectionKey) {
+  activeSection.value = section
+  mobileNavOpen.value = false
+}
+
+function sectionIcon(section: SectionKey) {
+  const map = {
+    accounts: User,
+    taskConfig: Setting,
+    taskStatus: Monitor,
+  }
+  return map[section]
 }
 
 async function editAccount(account: Account) {
@@ -511,6 +546,31 @@ function historyOptionLabel(history: TicketProjectHistory) {
   return `${history.projectName || '未命名项目'} · ${history.projectId}`
 }
 
+function ticketProjectHistorySuggestions(queryString: string, cb: (items: TicketProjectHistorySuggestion[]) => void) {
+  const keyword = queryString.trim().toLowerCase()
+  const suggestions = ticketProjectHistories.value
+    .filter((history) => {
+      if (!keyword) {
+        return true
+      }
+      return (
+        String(history.projectId).includes(keyword) ||
+        history.projectName.toLowerCase().includes(keyword) ||
+        history.venueName.toLowerCase().includes(keyword)
+      )
+    })
+    .map((history) => ({
+      ...history,
+      value: String(history.projectId),
+    }))
+  cb(suggestions)
+}
+
+function selectTicketProjectHistorySuggestion(history: TicketProjectHistorySuggestion) {
+  ticketProjectInput.value = String(history.projectId)
+  applyTicketProjectHistory()
+}
+
 function applyTicketProjectHistory() {
   const raw = ticketProjectInput.value.trim()
   const history = ticketProjectHistories.value.find((item) => String(item.projectId) === raw)
@@ -745,8 +805,18 @@ async function stopTask(id: number) {
 
 async function confirmDeleteTask(task: Task) {
   const taskName = task.name.trim() || `#${task.id}`
-  const confirmed = window.confirm(`确认删除任务「${taskName}」吗？\n如果任务正在运行，删除会同时停止后台任务。此操作不可撤销。`)
-  if (!confirmed) {
+  try {
+    await ElMessageBox.confirm(
+      `如果任务正在运行，删除会同时停止后台任务。此操作不可撤销。`,
+      `确认删除任务「${taskName}」？`,
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
     return
   }
   await deleteTask(task.id)
@@ -920,6 +990,19 @@ function accountStatusClass(account: Account) {
   return 'idle'
 }
 
+function accountStatusTagType(account: Account) {
+  if (!account.hasCookie) {
+    return 'warning'
+  }
+  if (account.status === 'logged_in') {
+    return 'success'
+  }
+  if (account.status === 'login_invalid') {
+    return 'danger'
+  }
+  return 'warning'
+}
+
 function taskStatusClass(status: string) {
   if (status === 'waiting_payment' || status === 'succeeded') {
     return 'ready'
@@ -928,6 +1011,29 @@ function taskStatusClass(status: string) {
     return 'bad'
   }
   return 'idle'
+}
+
+function taskStatusTagType(status: string) {
+  if (status === 'waiting_payment' || status === 'succeeded') {
+    return 'success'
+  }
+  if (status === 'failed' || status === 'waiting_user') {
+    return 'danger'
+  }
+  if (status === 'running' || status === 'waiting_start' || status === 'dispatched') {
+    return 'warning'
+  }
+  return 'info'
+}
+
+function logLevelTagType(level: string) {
+  if (level === 'warn') {
+    return 'warning'
+  }
+  if (level === 'error') {
+    return 'danger'
+  }
+  return 'info'
 }
 
 const qrStatusLabel = computed(() => {
@@ -956,6 +1062,16 @@ function qrStatusClass() {
   return 'idle'
 }
 
+function qrStatusTagType() {
+  if (qrLogin.status === 'confirmed') {
+    return 'success'
+  }
+  if (qrLogin.status === 'expired' || qrLogin.status === 'failed') {
+    return 'danger'
+  }
+  return 'warning'
+}
+
 onMounted(async () => {
   await loadAll()
   resetTaskForm()
@@ -975,63 +1091,82 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside class="sidebar">
+  <el-container class="app-shell">
+    <div v-if="loading" class="top-progress" aria-label="页面加载中"></div>
+
+    <el-aside width="260px" class="sidebar desktop-sidebar">
       <div>
         <p class="eyebrow">Biligo</p>
         <h1>票务控制台</h1>
       </div>
       <nav class="nav-list">
-        <button
+        <el-button
           v-for="section in sections"
           :key="section.key"
-          type="button"
+          :icon="sectionIcon(section.key)"
+          text
           :class="{ active: activeSection === section.key }"
-          @click="activeSection = section.key"
+          @click="setActiveSection(section.key)"
         >
           {{ section.label }}
-        </button>
+        </el-button>
       </nav>
       <div class="system-strip">
         <span :class="['dot', health?.status === 'ok' ? 'ok' : 'bad']"></span>
         <span>API {{ health?.status ?? '未连接' }}</span>
       </div>
-    </aside>
+    </el-aside>
 
-    <main class="workspace">
+    <el-drawer v-model="mobileNavOpen" title="票务控制台" direction="ltr" size="280px" class="mobile-drawer">
+      <nav class="nav-list drawer-nav">
+        <el-button
+          v-for="section in sections"
+          :key="section.key"
+          :icon="sectionIcon(section.key)"
+          text
+          :class="{ active: activeSection === section.key }"
+          @click="setActiveSection(section.key)"
+        >
+          {{ section.label }}
+        </el-button>
+      </nav>
+      <div class="system-strip drawer-system">
+        <span :class="['dot', health?.status === 'ok' ? 'ok' : 'bad']"></span>
+        <span>API {{ health?.status ?? '未连接' }}</span>
+      </div>
+    </el-drawer>
+
+    <el-main class="workspace">
       <header class="topbar">
-        <div>
+        <el-button class="mobile-menu-button" :icon="MenuIcon" circle @click="mobileNavOpen = true" />
+        <div class="topbar-title">
           <p class="eyebrow">本地单用户模式</p>
           <h2>{{ sections.find((section) => section.key === activeSection)?.label }}</h2>
         </div>
-        <button type="button" class="ghost-button" :disabled="loading" @click="loadAll">
-          刷新
-        </button>
+        <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
       </header>
 
-      <div v-if="error" class="alert error">{{ error }}</div>
-      <div v-if="notice" class="alert success">{{ notice }}</div>
+      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+      <el-alert v-if="notice" :title="notice" type="success" show-icon :closable="false" />
 
       <section v-if="activeSection === 'accounts'" class="content-grid">
         <div class="stack-column">
           <section class="panel qr-panel">
             <div class="panel-heading">
               <h3>扫码登录</h3>
-              <button type="button" class="text-button" @click="resetQRLogin">清空</button>
+              <el-button :icon="Close" text @click="resetQRLogin">清空</el-button>
             </div>
-            <label>
-              账号名称
-              <input v-model="qrLogin.accountName" placeholder="默认使用 B 站昵称" />
-            </label>
-            <label>
-              备注
-              <input v-model="qrLogin.note" placeholder="可填写实名人或用途备注" />
-            </label>
+            <el-form label-position="top">
+              <el-form-item label="账号名称">
+                <el-input v-model="qrLogin.accountName" placeholder="默认使用 B 站昵称" clearable />
+              </el-form-item>
+              <el-form-item label="备注">
+                <el-input v-model="qrLogin.note" placeholder="可填写实名人或用途备注" clearable />
+              </el-form-item>
+            </el-form>
             <div class="qr-status-row">
-              <span :class="['status-pill', qrStatusClass()]">{{ qrStatusLabel }}</span>
-              <span class="muted">
-                {{ qrLogin.autoPolling ? '自动轮询中' : '自动轮询已停止' }}
-              </span>
+              <el-tag :type="qrStatusTagType()">{{ qrStatusLabel }}</el-tag>
+              <span class="muted">{{ qrLogin.autoPolling ? '自动轮询中' : '自动轮询已停止' }}</span>
               <span v-if="qrLogin.lastCheckedAt" class="muted">上次检查 {{ qrLogin.lastCheckedAt }}</span>
             </div>
             <div v-if="qrLogin.qrImageDataUrl" class="qr-preview">
@@ -1039,41 +1174,34 @@ onUnmounted(() => {
               <span>{{ qrLogin.message }}</span>
             </div>
             <div class="button-row">
-              <button type="button" class="primary-button" :disabled="loading || qrLogin.polling" @click="startQRLogin">
+              <el-button type="primary" :icon="CirclePlus" :loading="loading || qrLogin.polling" @click="startQRLogin">
                 生成二维码
-              </button>
-              <button type="button" :disabled="loading || qrLogin.polling || !qrLogin.qrcodeKey" @click="pollQRLogin">
+              </el-button>
+              <el-button :icon="Check" :disabled="loading || qrLogin.polling || !qrLogin.qrcodeKey" @click="pollQRLogin">
                 检查登录
-              </button>
+              </el-button>
             </div>
           </section>
 
-          <form class="panel form-panel" @submit.prevent="saveAccount">
+          <el-form class="panel form-panel" label-position="top" @submit.prevent="saveAccount">
             <div class="panel-heading">
               <h3>{{ editingAccountId ? '编辑账号' : '新增账号' }}</h3>
-              <button type="button" class="text-button" @click="resetAccountForm">清空</button>
-          </div>
-          <label>
-            <span>账号名称 <span class="required-mark">*</span></span>
-            <input v-model="accountForm.name" required placeholder="例如：主账号" />
-          </label>
-            <label>
-              Cookie
-              <textarea v-model="accountForm.cookie" rows="5" placeholder="仅保存在本地 SQLite"></textarea>
-            </label>
-            <label>
-              备注
-              <input v-model="accountForm.note" placeholder="可填写实名人或用途备注" />
-            </label>
-            <div class="button-row">
-              <button type="submit" class="primary-button" :disabled="loading">
-                保存账号
-              </button>
-              <button type="button" :disabled="loading || !accountForm.cookie" @click="loginWithCookie">
-                验证并保存
-              </button>
+              <el-button :icon="Close" text @click="resetAccountForm">清空</el-button>
             </div>
-          </form>
+            <el-form-item required label="账号名称">
+              <el-input v-model="accountForm.name" placeholder="例如：主账号" clearable />
+            </el-form-item>
+            <el-form-item label="Cookie">
+              <el-input v-model="accountForm.cookie" type="textarea" :rows="5" placeholder="仅保存在本地 SQLite" />
+            </el-form-item>
+            <el-form-item label="备注">
+              <el-input v-model="accountForm.note" placeholder="可填写实名人或用途备注" clearable />
+            </el-form-item>
+            <div class="button-row">
+              <el-button native-type="submit" type="primary" :icon="Document" :loading="loading">保存账号</el-button>
+              <el-button :icon="Check" :disabled="loading || !accountForm.cookie" @click="loginWithCookie">验证并保存</el-button>
+            </div>
+          </el-form>
         </div>
 
         <section class="panel list-panel">
@@ -1082,9 +1210,9 @@ onUnmounted(() => {
             <span class="muted">{{ session?.message }}</span>
           </div>
           <div class="summary-row">
-            <span>账号 {{ session?.accountCount ?? 0 }}</span>
-            <span>已配置 {{ session?.configuredAccounts ?? 0 }}</span>
-            <span>已验证 {{ session?.verifiedAccounts ?? 0 }}</span>
+            <el-tag>账号 {{ session?.accountCount ?? 0 }}</el-tag>
+            <el-tag type="warning">已配置 {{ session?.configuredAccounts ?? 0 }}</el-tag>
+            <el-tag type="success">已验证 {{ session?.verifiedAccounts ?? 0 }}</el-tag>
           </div>
           <article v-for="account in accounts" :key="account.id" class="item-card">
             <div>
@@ -1093,57 +1221,52 @@ onUnmounted(() => {
               <small>{{ account.note || '无备注' }}</small>
             </div>
             <div class="actions">
-              <span :class="['status-pill', accountStatusClass(account)]">
-                {{ accountStatusLabel(account) }}
-              </span>
-              <button type="button" :disabled="!account.hasCookie || loading" @click="verifyAccount(account.id)">
-                验证
-              </button>
-              <button type="button" :disabled="!account.hasCookie || loading" @click="copyAccountCookie(account.id)">
+              <el-tag :type="accountStatusTagType(account)">{{ accountStatusLabel(account) }}</el-tag>
+              <el-button :icon="Check" :disabled="!account.hasCookie || loading" @click="verifyAccount(account.id)">验证</el-button>
+              <el-button :icon="CopyDocument" :disabled="!account.hasCookie || loading" @click="copyAccountCookie(account.id)">
                 复制 Cookie
-              </button>
-              <button type="button" @click="editAccount(account)">编辑</button>
-              <button type="button" class="danger-button" @click="deleteAccount(account.id)">删除</button>
+              </el-button>
+              <el-button :icon="Edit" @click="editAccount(account)">编辑</el-button>
+              <el-button type="danger" plain :icon="Delete" @click="deleteAccount(account.id)">删除</el-button>
             </div>
           </article>
-          <p v-if="accounts.length === 0" class="empty">暂无账号</p>
+          <el-empty v-if="accounts.length === 0" description="暂无账号" />
         </section>
       </section>
 
       <section v-if="activeSection === 'taskConfig'" class="content-grid">
-        <form class="panel form-panel" @submit.prevent="saveTask">
+        <el-form class="panel form-panel" label-position="top" @submit.prevent="saveTask">
           <div class="panel-heading">
             <h3>{{ editingTaskId ? '编辑任务' : '新增任务' }}</h3>
-            <button type="button" class="text-button" @click="resetTaskForm">清空</button>
+            <el-button :icon="Close" text @click="resetTaskForm">清空</el-button>
           </div>
-          <label>
-            <span>任务名称 <span class="required-mark">*</span></span>
-            <input v-model="taskForm.name" required placeholder="例如：上海场 2 张" />
-          </label>
-          <label>
-            <span>抢票项目 ID <span class="required-mark">*</span></span>
+          <el-form-item required label="任务名称">
+            <el-input v-model="taskForm.name" placeholder="例如：上海场 2 张" clearable />
+          </el-form-item>
+          <el-form-item required label="抢票项目 ID">
             <div class="input-action-row">
-              <input
+              <el-autocomplete
                 v-model="ticketProjectInput"
-                list="ticket-project-history"
+                :fetch-suggestions="ticketProjectHistorySuggestions"
+                value-key="value"
                 placeholder="项目 ID 或详情页链接"
+                clearable
                 @change="applyTicketProjectHistory"
-              />
-              <button type="button" :disabled="loading || !ticketProjectInput.trim()" @click="fetchTicketProject">
-                获取信息
-              </button>
-            </div>
-            <datalist id="ticket-project-history">
-              <option
-                v-for="history in ticketProjectHistories"
-                :key="history.projectId"
-                :value="String(history.projectId)"
-                :label="historyOptionLabel(history)"
+                @select="selectTicketProjectHistorySuggestion"
               >
-                {{ historyOptionLabel(history) }}
-              </option>
-            </datalist>
-          </label>
+                <template #default="{ item }">
+                  <div class="history-suggestion">
+                    <strong>{{ item.projectName || '未命名项目' }}</strong>
+                    <span>ID {{ item.projectId }}</span>
+                    <small>{{ [item.venueName, item.venueAddress].filter(Boolean).join(' ') || '暂无场馆信息' }}</small>
+                  </div>
+                </template>
+              </el-autocomplete>
+              <el-button :icon="Search" :loading="loading" :disabled="!ticketProjectInput.trim()" @click="fetchTicketProject">
+                获取信息
+              </el-button>
+            </div>
+          </el-form-item>
           <div v-if="fetchedTicketProject" class="ticket-summary">
             <strong>{{ fetchedTicketProject.projectName || '未命名项目' }}</strong>
             <span>ID {{ fetchedTicketProject.projectId }}</span>
@@ -1154,128 +1277,133 @@ onUnmounted(() => {
               {{ fetchedTicketProject.startAt || '-' }} 至 {{ fetchedTicketProject.endAt || '-' }}
             </span>
           </div>
-          <label>
-            <span>票信息 <span class="required-mark">*</span></span>
-            <select
+          <el-form-item required label="票信息">
+            <el-select
               v-model="selectedTicketValue"
               :disabled="ticketOptions.length === 0"
-              required
+              placeholder="选择票信息"
+              filterable
               @change="selectTicketOption"
             >
-              <option value="" disabled>{{ ticketOptions.length === 0 ? '' : '选择票信息' }}</option>
-              <option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value">
-                {{ ticket.display }}
-              </option>
-            </select>
-          </label>
+              <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+            </el-select>
+          </el-form-item>
           <div v-if="selectedTicketOption" class="ticket-detail-grid">
             <span>{{ selectedTicketOption.screenName }}</span>
             <span>{{ selectedTicketOption.ticketLevel }}</span>
             <span>{{ selectedTicketOption.priceText }}</span>
             <span>{{ selectedTicketOption.saleStatus }}</span>
           </div>
-          <label>
-            <span>账号 <span class="required-mark">*</span></span>
+          <el-form-item required label="账号">
             <div class="input-action-row">
-              <select v-model.number="taskForm.accountId" @change="handleTaskAccountChange">
-                <option :value="0">未选择</option>
-                <option v-for="account in accounts" :key="account.id" :value="account.id">
-                  {{ account.name }}
-                </option>
-              </select>
-              <button
-                type="button"
-                :disabled="loading || taskForm.accountId <= 0 || !hasFetchedTicketInfo"
+              <el-select v-model="taskForm.accountId" placeholder="未选择" @change="handleTaskAccountChange">
+                <el-option :value="0" label="未选择" />
+                <el-option v-for="account in accounts" :key="account.id" :value="account.id" :label="account.name" />
+              </el-select>
+              <el-button
+                :icon="User"
+                :loading="loading"
+                :disabled="taskForm.accountId <= 0 || !hasFetchedTicketInfo"
                 @click="fetchTicketAccountContext"
               >
                 获取信息
-              </button>
+              </el-button>
             </div>
-          </label>
-          <div class="field">
-            <span class="field-label">实名购票人 <span class="required-mark">*</span></span>
+          </el-form-item>
+          <el-form-item required label="实名购票人">
             <div class="buyer-check-list" :class="{ disabled: ticketBuyers.length === 0 }">
-              <label v-for="(buyer, index) in ticketBuyers" :key="`${buyer.id ?? buyer.name}-${index}`" class="buyer-check">
-                <input
-                  v-model="selectedBuyerIndexes"
-                  type="checkbox"
-                  :value="index"
-                  :disabled="ticketBuyers.length === 0"
-                  @change="updateSelectedBuyers"
-                />
-                <span>{{ buyerLabel(buyer) }}</span>
-              </label>
+              <el-checkbox-group v-model="selectedBuyerIndexes" @change="updateSelectedBuyers">
+                <el-checkbox v-for="(buyer, index) in ticketBuyers" :key="`${buyer.id ?? buyer.name}-${index}`" :label="index">
+                  {{ buyerLabel(buyer) }}
+                </el-checkbox>
+              </el-checkbox-group>
               <span v-if="ticketBuyers.length === 0" class="muted">请先在账号行获取信息</span>
             </div>
-          </div>
-          <label>
-            <span>收货地址 <span class="required-mark">*</span></span>
-            <select v-model.number="selectedAddressId" :disabled="ticketAddresses.length === 0" @change="updateSelectedAddress">
-              <option :value="0">未选择</option>
-              <option v-for="address in ticketAddresses" :key="address.id" :value="address.id">
-                {{ addressLabel(address) }}
-              </option>
-            </select>
-          </label>
-          <div class="form-row">
-            <label>
-              <span>联系人姓名 <span class="required-mark">*</span></span>
-              <input v-model="taskForm.buyer" placeholder="用于订单联系人" />
-            </label>
-            <label>
-              <span>联系人电话 <span class="required-mark">*</span></span>
-              <input v-model="taskForm.tel" placeholder="用于订单联系人" />
-            </label>
-          </div>
-          <label>
-            支付手机号
-            <input v-model="taskForm.phone" placeholder="可选" />
-          </label>
-          <div class="form-row">
-            <label>
-              张数
-              <input :value="taskForm.buyerInfo.length || 0" disabled />
-            </label>
-            <label>
-              预计金额
-              <input :value="formatMoney(taskForm.payMoney)" disabled />
-            </label>
-          </div>
-          <div class="form-row">
-            <label>
-              <span>重试间隔（ms） <span class="required-mark">*</span></span>
-              <input v-model.number="taskForm.pollIntervalMillis" min="1" type="number" placeholder="例如：1000" />
-            </label>
-            <label>
-              时间同步策略
-              <select v-model="taskForm.timeSyncStrategy">
-                <option value="bilibili">哔哩哔哩时间</option>
-                <option value="local">本地时间</option>
-              </select>
-            </label>
-          </div>
-          <p class="field-hint">
-            默认在任务下发时请求哔哩哔哩时间接口同步；建议距离开票时间大于 1 分钟时使用，时间过近可切换本地时间。
-          </p>
-          <label>
-            订单类型
-            <input :value="taskForm.orderType" disabled />
-          </label>
-          <div class="form-row">
-            <label>
-              结束时间
-              <input v-model="taskForm.endAt" type="datetime-local" />
-            </label>
-            <label>
-              <span>起售时间 <span class="required-mark">*</span></span>
-              <input :value="taskForm.saleStart" disabled />
-            </label>
-          </div>
+          </el-form-item>
+          <el-form-item required label="收货地址">
+            <el-select v-model="selectedAddressId" :disabled="ticketAddresses.length === 0" placeholder="未选择" filterable @change="updateSelectedAddress">
+              <el-option :value="0" label="未选择" />
+              <el-option v-for="address in ticketAddresses" :key="address.id" :value="address.id" :label="addressLabel(address)" />
+            </el-select>
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :xs="24" :sm="12">
+              <el-form-item required label="联系人姓名">
+                <el-input v-model="taskForm.buyer" placeholder="用于订单联系人" clearable />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item required label="联系人电话">
+                <el-input v-model="taskForm.tel" placeholder="用于订单联系人" clearable />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="支付手机号">
+            <el-input v-model="taskForm.phone" placeholder="可选" clearable />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="张数">
+                <el-input :model-value="String(taskForm.buyerInfo.length || 0)" disabled />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="预计金额">
+                <el-input :model-value="formatMoney(taskForm.payMoney)" disabled />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="12">
+            <el-col :xs="24" :sm="12">
+              <el-form-item required label="重试间隔（ms）">
+                <el-input-number v-model="taskForm.pollIntervalMillis" :min="1" controls-position="right" class="full-input" />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="时间同步策略">
+                <el-select v-model="taskForm.timeSyncStrategy">
+                  <el-option value="bilibili" label="哔哩哔哩时间" />
+                  <el-option value="local" label="本地时间" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-alert type="info" show-icon :closable="false" class="form-tip-alert">
+            <template #title>
+              <strong>时间同步提示</strong>
+            </template>
+            <div class="tip-copy">
+              <span>默认在任务下发时请求哔哩哔哩时间接口同步。</span>
+              <span>建议距离开票时间大于 1 分钟时使用，时间过近可切换本地时间。</span>
+            </div>
+          </el-alert>
+          <el-form-item label="订单类型">
+            <el-input :model-value="String(taskForm.orderType)" disabled />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="结束时间">
+                <el-date-picker
+                  v-model="taskForm.endAt"
+                  type="datetime"
+                  value-format="YYYY-MM-DDTHH:mm"
+                  format="YYYY-MM-DD HH:mm"
+                  placeholder=""
+                  class="full-input"
+                />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item required label="起售时间">
+                <el-input :model-value="taskForm.saleStart" disabled />
+              </el-form-item>
+            </el-col>
+          </el-row>
           <p class="field-hint">不填写则默认开票后 10 分钟停止。</p>
-          <button type="submit" class="primary-button" :disabled="loading || !canSaveTask">
+          <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveTask" :loading="loading">
             保存任务
-          </button>
-        </form>
+          </el-button>
+        </el-form>
 
         <div class="stack-column">
           <section class="panel list-panel">
@@ -1291,15 +1419,13 @@ onUnmounted(() => {
                 <small>{{ taskBuyerSummary(task) }}</small>
               </div>
               <div class="actions">
-                <span :class="['status-pill', taskStatusClass(task.status)]">
-                  {{ statusLabel(task.status) }}
-                </span>
-                <button type="button" @click="editTask(task)">编辑</button>
-                <button type="button" class="primary-button compact" @click="dispatchTask(task.id)">下发</button>
-                <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
+                <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
+                <el-button :icon="Edit" @click="editTask(task)">编辑</el-button>
+                <el-button type="primary" :icon="VideoPlay" @click="dispatchTask(task.id)">下发</el-button>
+                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
               </div>
             </article>
-            <p v-if="pendingTasks.length === 0" class="empty">暂无待下发任务</p>
+            <el-empty v-if="pendingTasks.length === 0" description="暂无待下发任务" />
           </section>
 
           <section class="panel list-panel">
@@ -1315,22 +1441,13 @@ onUnmounted(() => {
                 <small>{{ taskBuyerSummary(task) }}</small>
               </div>
               <div class="actions">
-                <span :class="['status-pill', taskStatusClass(task.status)]">
-                  {{ statusLabel(task.status) }}
-                </span>
-                <button
-                  type="button"
-                  disabled
-                  title="请先停止任务后再编辑"
-                  @click="editTask(task)"
-                >
-                  编辑
-                </button>
-                <button type="button" @click="stopTask(task.id)">停止</button>
-                <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
+                <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
+                <el-button :icon="Edit" disabled title="请先停止任务后再编辑">编辑</el-button>
+                <el-button :icon="SwitchButton" @click="stopTask(task.id)">停止</el-button>
+                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
               </div>
             </article>
-            <p v-if="dispatchedTasks.length === 0" class="empty">暂无已下发任务</p>
+            <el-empty v-if="dispatchedTasks.length === 0" description="暂无已下发任务" />
           </section>
         </div>
       </section>
@@ -1341,50 +1458,65 @@ onUnmounted(() => {
             <h3>任务状态</h3>
             <span class="muted">SSE {{ sseStatus }} · {{ selectedTask?.name || '未选择任务' }}</span>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>任务</th>
-                  <th>账号</th>
-                  <th>状态</th>
-                  <th>倒计时/时间源</th>
-                  <th>最近消息</th>
-                  <th>支付</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="task in tasks" :key="task.id">
-                  <td>
-                    <strong>{{ task.name }}</strong>
-                    <small>{{ taskBuyerSummary(task) }}</small>
-                  </td>
-                  <td>{{ task.accountName || '-' }}</td>
-                  <td><span :class="['status-pill', taskStatusClass(task.status)]">{{ statusLabel(task.status) }}</span></td>
-                  <td>
-                    <strong>{{ countdownText(task) }}</strong>
-                    <small>{{ timeSyncSummary(task) }}</small>
-                  </td>
-                  <td>{{ task.lastMessage || '-' }}</td>
-                  <td>
-                    <div v-if="task.status === 'waiting_payment' && task.paymentUrl" class="payment-cell">
-                      <img v-if="task.paymentQrImageDataUrl" :src="task.paymentQrImageDataUrl" alt="支付二维码" />
-                      <button type="button" @click="copyPaymentUrl(task)">复制链接</button>
-                    </div>
-                    <span v-else>-</span>
-                  </td>
-                  <td class="table-actions">
-                    <button type="button" @click="selectTaskLog(task)">日志</button>
-                    <button type="button" class="primary-button compact" @click="startTask(task.id)">启动</button>
-                    <button type="button" @click="stopTask(task.id)">停止</button>
-                    <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <el-table :data="tasks" class="desktop-task-table" row-key="id" empty-text="暂无任务">
+            <el-table-column label="任务" min-width="220">
+              <template #default="{ row }">
+                <strong>{{ row.name }}</strong>
+                <small>{{ taskBuyerSummary(row) }}</small>
+              </template>
+            </el-table-column>
+            <el-table-column prop="accountName" label="账号" min-width="130" />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="taskStatusTagType(row.status)">{{ statusLabel(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="倒计时/时间源" min-width="170">
+              <template #default="{ row }">
+                <strong>{{ countdownText(row) }}</strong>
+                <small>{{ timeSyncSummary(row) }}</small>
+              </template>
+            </el-table-column>
+            <el-table-column prop="lastMessage" label="最近消息" min-width="220" show-overflow-tooltip />
+            <el-table-column label="支付" min-width="130">
+              <template #default="{ row }">
+                <div v-if="row.status === 'waiting_payment' && row.paymentUrl" class="payment-cell">
+                  <img v-if="row.paymentQrImageDataUrl" :src="row.paymentQrImageDataUrl" alt="支付二维码" />
+                  <el-button size="small" :icon="CopyDocument" @click="copyPaymentUrl(row)">复制链接</el-button>
+                </div>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="260" fixed="right">
+              <template #default="{ row }">
+                <div class="table-actions">
+                  <el-button size="small" :icon="View" @click="selectTaskLog(row)">日志</el-button>
+                  <el-button size="small" type="primary" :icon="VideoPlay" @click="startTask(row.id)">启动</el-button>
+                  <el-button size="small" :icon="SwitchButton" @click="stopTask(row.id)">停止</el-button>
+                  <el-button size="small" type="danger" plain :icon="Delete" @click="confirmDeleteTask(row)">删除</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="mobile-task-list">
+            <article v-for="task in tasks" :key="task.id" class="item-card">
+              <div>
+                <h4>{{ task.name }}</h4>
+                <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
+                <small>{{ taskBuyerSummary(task) }}</small>
+                <small>{{ timeSyncSummary(task) }}</small>
+                <small>{{ task.lastMessage || '-' }}</small>
+              </div>
+              <div class="actions">
+                <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
+                <el-button :icon="View" @click="selectTaskLog(task)">日志</el-button>
+                <el-button type="primary" :icon="VideoPlay" @click="startTask(task.id)">启动</el-button>
+                <el-button :icon="SwitchButton" @click="stopTask(task.id)">停止</el-button>
+                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
+              </div>
+            </article>
+            <el-empty v-if="tasks.length === 0" description="暂无任务" />
           </div>
-          <p v-if="tasks.length === 0" class="empty">暂无任务</p>
         </section>
 
         <section class="panel log-panel">
@@ -1393,16 +1525,16 @@ onUnmounted(() => {
               <h3>运行日志</h3>
               <small v-if="selectedTaskTicketSubtitle" class="muted">{{ selectedTaskTicketSubtitle }}</small>
             </div>
-            <button type="button" class="text-button" @click="showAllLogs">全部</button>
+            <el-button text :icon="Document" @click="showAllLogs">全部</el-button>
           </div>
           <article v-for="log in logs" :key="log.id" class="log-line">
-            <span :class="['log-level', log.level]">{{ log.level }}</span>
+            <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
             <p>{{ log.message }}</p>
             <time>{{ log.createdAt }}</time>
           </article>
-          <p v-if="logs.length === 0" class="empty">暂无日志</p>
+          <el-empty v-if="logs.length === 0" description="暂无日志" />
         </section>
       </section>
-    </main>
-  </div>
+    </el-main>
+  </el-container>
 </template>
