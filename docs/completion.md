@@ -8,6 +8,31 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 前端包管理切换 pnpm
+
+类型：工程工具调整
+
+摘要：前端依赖管理从 npm 切换为 pnpm，统一锁文件和开发命令。
+
+主要变更：
+
+- `web/package.json` 新增 `packageManager: pnpm@11.6.0`。
+- 删除 `web/package-lock.json`，新增 `web/pnpm-lock.yaml`。
+- 新增 `web/pnpm-workspace.yaml`，明确允许 `esbuild` 执行必要构建脚本。
+- VS Code 前端开发任务改为 `pnpm dev`。
+- README 技术栈补充前端包管理工具 pnpm。
+
+验收情况：
+
+- 已通过 `pnpm install --frozen-lockfile`。
+- 已通过 `pnpm build`。
+- 已通过 `go test ./...`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 本地需要安装 pnpm 11.6.0 或兼容版本。
+
 ## 2026-06-15 自定义应用日志
 
 类型：可观测性优化
