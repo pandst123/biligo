@@ -8,6 +8,31 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 Embed 前端同端口接入
+
+类型：打包部署增强
+
+摘要：支持将前端构建产物嵌入 Go 二进制，并由同一个 Gin 服务同时提供页面和 `/api`。
+
+主要变更：
+
+- 新增 `internal/webui`，使用 `embed_web` build tag 嵌入前端静态资源。
+- 带 `embed_web` 构建时自动同端口提供 `/`、`/assets/*` 和 SPA fallback；未带 `embed_web` 时仅启用 API 服务。
+- 启动日志会输出当前使用“嵌入前端资源”还是“仅 API 服务”。
+- README 补充直接运行方式和单 exe 打包示例。
+
+验收情况：
+
+- 已通过 `go test ./...`。
+- 已通过 `pnpm build`。
+- 已通过 `go test -tags embed_web ./...`。
+- 已通过 `go build -tags embed_web ./cmd/server`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 嵌入编译前需要先将 `web/dist` 复制到 `internal/webui/dist`。
+
 ## 2026-06-15 前端包管理切换 pnpm
 
 类型：工程工具调整

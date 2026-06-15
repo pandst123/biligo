@@ -13,6 +13,7 @@ import (
 	"github.com/fdcs99/biligo/internal/httpapi"
 	"github.com/fdcs99/biligo/internal/panelauth"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/fdcs99/biligo/internal/webui"
 )
 
 func main() {
@@ -43,6 +44,19 @@ func main() {
 		logger.Infof("面板登录密码已生成并写入 %s：%s", cfg.Path, cfg.GeneratedPanelPassword)
 	}
 
+	var routerOptions []httpapi.RouterOption
+	if webui.Embedded() {
+		webFS, err := webui.Dist()
+		if err != nil {
+			logger.Errorf("load embedded web assets: %v", err)
+			os.Exit(1)
+		}
+		routerOptions = append(routerOptions, httpapi.WithWebFS(webFS))
+		logger.Infof("Web 控制台使用嵌入前端资源，同端口提供页面：%s", cfg.Server.Addr)
+	} else {
+		logger.Infof("Web 控制台未嵌入，仅启用 API 服务。")
+	}
+
 	db, err := store.Open(cfg.Database.Path)
 	if err != nil {
 		logger.Errorf("open database: %v", err)
@@ -59,7 +73,7 @@ func main() {
 		logger.Warnf("启动时自动停止 %d 个上次未结束任务。", len(pausedTasks))
 	}
 
-	router := httpapi.NewRouter(db, panelauth.NewManager(cfg.Auth.Password, 24*time.Hour), logger)
+	router := httpapi.NewRouter(db, panelauth.NewManager(cfg.Auth.Password, 24*time.Hour), logger, routerOptions...)
 	logger.Infof("Biligo 服务监听 %s。", cfg.Server.Addr)
 	if err := router.Run(cfg.Server.Addr); err != nil {
 		logger.Errorf("run server: %v", err)

@@ -12,6 +12,7 @@ coverage.out
 web/node_modules/
 web/dist/
 web/.vite/
+internal/webui/dist/
 
 # OS / editor
 .DS_Store

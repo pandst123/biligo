@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/fdcs99/biligo/internal/applog"
@@ -211,6 +212,66 @@ func TestPanelAuthLogsLoginLogoutAndTaskLogs(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "[INFO] 面板退出登录成功") {
 		t.Fatalf("logout log missing: %q", out.String())
+	}
+}
+
+func TestWebUIRoutesDoNotInterceptAPI(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := NewRouter(
+		taskStore,
+		panelauth.NewManager("panel-secret", 24*time.Hour),
+		applog.NewWithWriter([]string{"none"}, nil),
+		WithWebFS(fstest.MapFS{
+			"index.html":    {Data: []byte("<html><body>Biligo App</body></html>")},
+			"assets/app.js": {Data: []byte("console.log('biligo')")},
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "Biligo App") {
+		t.Fatalf("index status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "console.log") {
+		t.Fatalf("asset status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/task/detail/1", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "Biligo App") {
+		t.Fatalf("spa fallback status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/not-found", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound || strings.Contains(resp.Body.String(), "Biligo App") {
+		t.Fatalf("api fallback status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound || strings.Contains(resp.Body.String(), "Biligo App") {
+		t.Fatalf("bare api fallback status = %d, body = %s", resp.Code, resp.Body.String())
 	}
 }
 

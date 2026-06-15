@@ -43,6 +43,58 @@ SQLite
 
 详见 `docs/api.md`
 
+## 直接运行 (开发模式)
+
+开发时可以前后端分别启动。后端默认监听 `:8080`，前端 Vite 开发服务默认监听 `5173`，并将 `/api` 代理到后端。
+
+```bash
+# 启动后端 API
+go run ./cmd/server -config config.yaml
+```
+
+```bash
+# 启动前端开发服务
+cd web
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+访问 `http://127.0.0.1:5173/` 使用前端控制台。
+
+如果已经使用 `embed_web` 构建了嵌入前端的二进制，则只需要运行后端程序，访问 `server.addr` 对应地址即可，例如 `http://127.0.0.1:8080/`。
+未使用 `embed_web` 构建时，程序会仅提供 API 服务。
+
+## 编译打包
+
+开发模式下，前端和后端可以分别启动。若需要打包为一个可执行文件，并由同一个端口同时提供前端页面和 `/api`，可以使用 `embed_web` 构建标签。
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+
+rm -rf internal/webui/dist
+mkdir -p internal/webui/dist
+cp -R web/dist/. internal/webui/dist/
+
+GOOS=windows GOARCH=amd64 go build \
+  -tags embed_web \
+  -trimpath \
+  -ldflags="-s -w" \
+  -o release/biligo.exe \
+  ./cmd/server
+```
+
+嵌入前端会自动启用，无需额外配置。端口仍由 `server.addr` 控制：
+
+```yaml
+server:
+  addr: ":8080"
+```
+
+运行后访问 `http://127.0.0.1:8080/`，API 仍位于同端口的 `/api` 下。
+
 ## 特别鸣谢
 项目 [biliTickerBuy](https://github.com/mikumifa/biliTickerBuy) 提供抢票相关逻辑
 项目 [BHYG](https://github.com/ZianTT/BHYG) 提供风控监测相关逻辑

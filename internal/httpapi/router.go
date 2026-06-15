@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,8 +35,25 @@ type Handler struct {
 	logger *applog.Logger
 }
 
-func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logger) *gin.Engine {
+type RouterOptions struct {
+	WebFS fs.FS
+}
+
+type RouterOption func(*RouterOptions)
+
+func WithWebFS(webFS fs.FS) RouterOption {
+	return func(options *RouterOptions) {
+		options.WebFS = webFS
+	}
+}
+
+func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logger, opts ...RouterOption) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
+	var options RouterOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	router := gin.New()
 	router.Use(devCORS())
 	router.Use(recovery(logger))
@@ -93,7 +112,49 @@ func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logg
 		}
 	}
 
+	if options.WebFS != nil {
+		registerWebUI(router, options.WebFS)
+	}
+
 	return router
+}
+
+func registerWebUI(router *gin.Engine, webFS fs.FS) {
+	httpFS := http.FS(webFS)
+	serveIndex := func(c *gin.Context) {
+		data, err := fs.ReadFile(webFS, "index.html")
+		if err != nil {
+			c.String(http.StatusInternalServerError, "web index not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	}
+
+	router.GET("/", serveIndex)
+	router.GET("/assets/*filepath", func(c *gin.Context) {
+		c.FileFromFS(path.Clean(c.Request.URL.Path), httpFS)
+	})
+	router.NoRoute(func(c *gin.Context) {
+		if c.Request.URL.Path == "/api" || strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "接口不存在"})
+			return
+		}
+
+		name := strings.TrimPrefix(path.Clean(c.Request.URL.Path), "/")
+		if webFileExists(webFS, name) {
+			c.FileFromFS(name, httpFS)
+			return
+		}
+		serveIndex(c)
+	})
+}
+
+func webFileExists(webFS fs.FS, name string) bool {
+	if name == "" || name == "." {
+		return false
+	}
+	info, err := fs.Stat(webFS, name)
+	return err == nil && !info.IsDir()
 }
 
 func devCORS() gin.HandlerFunc {
