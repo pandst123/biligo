@@ -63,20 +63,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS ticket_groups (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			event_id TEXT NOT NULL DEFAULT '',
-			event_name TEXT NOT NULL DEFAULT '',
-			venue TEXT NOT NULL DEFAULT '',
-			session_name TEXT NOT NULL DEFAULT '',
-			ticket_level TEXT NOT NULL DEFAULT '',
-			price_range TEXT NOT NULL DEFAULT '',
-			sale_time TEXT NOT NULL DEFAULT '',
-			note TEXT NOT NULL DEFAULT '',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
 		`CREATE TABLE IF NOT EXISTS ticket_project_history (
 			project_id INTEGER PRIMARY KEY,
 			project_name TEXT NOT NULL DEFAULT '',
@@ -91,9 +77,32 @@ func (s *Store) migrate(ctx context.Context) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			account_id INTEGER NOT NULL DEFAULT 0,
-			ticket_group_id INTEGER NOT NULL DEFAULT 0,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			project_name TEXT NOT NULL DEFAULT '',
+			screen_id INTEGER NOT NULL DEFAULT 0,
+			sku_id INTEGER NOT NULL DEFAULT 0,
 			session_name TEXT NOT NULL DEFAULT '',
 			ticket_level TEXT NOT NULL DEFAULT '',
+			ticket_display TEXT NOT NULL DEFAULT '',
+			ticket_price INTEGER NOT NULL DEFAULT 0,
+			sale_start TEXT NOT NULL DEFAULT '',
+			sale_status TEXT NOT NULL DEFAULT '',
+			link_id INTEGER NOT NULL DEFAULT 0,
+			is_hot_project INTEGER NOT NULL DEFAULT 0,
+			order_type INTEGER NOT NULL DEFAULT 1,
+			pay_money INTEGER NOT NULL DEFAULT 0,
+			buyer_info TEXT NOT NULL DEFAULT '[]',
+			buyer TEXT NOT NULL DEFAULT '',
+			tel TEXT NOT NULL DEFAULT '',
+			deliver_info TEXT NOT NULL DEFAULT '{}',
+			phone TEXT NOT NULL DEFAULT '',
+			order_id TEXT NOT NULL DEFAULT '',
+			payment_url TEXT NOT NULL DEFAULT '',
+			payment_qr_image_data_url TEXT NOT NULL DEFAULT '',
+			last_checked_at TEXT NOT NULL DEFAULT '',
+			time_sync_strategy TEXT NOT NULL DEFAULT 'bilibili',
+			time_offset_ms INTEGER NOT NULL DEFAULT 0,
+			time_synced_at TEXT NOT NULL DEFAULT '',
 			quantity INTEGER NOT NULL DEFAULT 1,
 			start_at TEXT NOT NULL DEFAULT '',
 			end_at TEXT NOT NULL DEFAULT '',
@@ -117,69 +126,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-
-	taskColumns := map[string]string{
-		"project_id":                "INTEGER NOT NULL DEFAULT 0",
-		"project_name":              "TEXT NOT NULL DEFAULT ''",
-		"screen_id":                 "INTEGER NOT NULL DEFAULT 0",
-		"sku_id":                    "INTEGER NOT NULL DEFAULT 0",
-		"ticket_display":            "TEXT NOT NULL DEFAULT ''",
-		"ticket_price":              "INTEGER NOT NULL DEFAULT 0",
-		"sale_start":                "TEXT NOT NULL DEFAULT ''",
-		"sale_status":               "TEXT NOT NULL DEFAULT ''",
-		"link_id":                   "INTEGER NOT NULL DEFAULT 0",
-		"is_hot_project":            "INTEGER NOT NULL DEFAULT 0",
-		"order_type":                "INTEGER NOT NULL DEFAULT 1",
-		"pay_money":                 "INTEGER NOT NULL DEFAULT 0",
-		"buyer_info":                "TEXT NOT NULL DEFAULT '[]'",
-		"buyer":                     "TEXT NOT NULL DEFAULT ''",
-		"tel":                       "TEXT NOT NULL DEFAULT ''",
-		"deliver_info":              "TEXT NOT NULL DEFAULT '{}'",
-		"phone":                     "TEXT NOT NULL DEFAULT ''",
-		"order_id":                  "TEXT NOT NULL DEFAULT ''",
-		"payment_url":               "TEXT NOT NULL DEFAULT ''",
-		"payment_qr_image_data_url": "TEXT NOT NULL DEFAULT ''",
-		"last_checked_at":           "TEXT NOT NULL DEFAULT ''",
-		"time_sync_strategy":        "TEXT NOT NULL DEFAULT 'bilibili'",
-		"time_offset_ms":            "INTEGER NOT NULL DEFAULT 0",
-		"time_synced_at":            "TEXT NOT NULL DEFAULT ''",
-		"poll_interval_ms":          "INTEGER NOT NULL DEFAULT 1000",
-	}
-	for column, definition := range taskColumns {
-		if err := s.ensureColumn(ctx, "tasks", column, definition); err != nil {
-			return err
-		}
-	}
 	return nil
-}
-
-func (s *Store) ensureColumn(ctx context.Context, table string, column string, definition string) error {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var dataType string
-		var notNull int
-		var defaultValue any
-		var primaryKey int
-		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return err
-		}
-		if name == column {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition))
-	return err
 }
 
 func (s *Store) SessionSummary(ctx context.Context) (model.SessionSummary, error) {
@@ -503,7 +450,7 @@ func (s *Store) PauseInterruptedTasks(ctx context.Context) ([]model.Task, error)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id
 		FROM tasks
-		WHERE status IN ('waiting_start', 'running', 'dispatched')
+		WHERE status IN ('waiting_start', 'running')
 		ORDER BY id ASC
 	`)
 	if err != nil {

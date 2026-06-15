@@ -593,10 +593,6 @@
 | `bilibili` | 默认值。任务下发时请求 `https://api.live.bilibili.com/xlive/open-interface/v1/rtc/getTimestamp` 5 次，按半个 RTT 修正每次样本，去除最大和最小 offset 后取剩余 3 次平均值。 |
 | `local` | 使用本地机器时间，`timeOffsetMillis` 为 `0`。 |
 
-兼容说明：
-
-- 为兼容已有本地数据库，后端暂保留旧 `ticket_groups` 表和任务表中的历史列；公开 API 不再接收或返回票组字段。
-
 ### PUT `/api/tasks/{id}`
 
 更新任务配置。

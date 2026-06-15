@@ -132,7 +132,7 @@ const selectedTaskTicketSubtitle = computed(() =>
   selectedTask.value ? taskTicketSummary(selectedTask.value) : '',
 )
 const pendingTasks = computed(() => tasks.value.filter((task) => task.status === 'draft' || task.status === 'paused'))
-const dispatchedTasks = computed(() => tasks.value.filter((task) => task.status !== 'draft' && task.status !== 'paused'))
+const issuedTasks = computed(() => tasks.value.filter((task) => task.status !== 'draft' && task.status !== 'paused'))
 const selectedTicketOption = computed(() =>
   ticketOptions.value.find((ticket) => ticket.value === selectedTicketValue.value),
 )
@@ -951,7 +951,6 @@ async function copyPaymentUrl(task: Task) {
 function statusLabel(status: string) {
   const map: Record<string, string> = {
     draft: '草稿',
-    dispatched: '已下发',
     waiting_start: '等待起售',
     waiting_payment: '待支付',
     succeeded: '已成功',
@@ -1020,7 +1019,7 @@ function taskStatusTagType(status: string) {
   if (status === 'failed' || status === 'waiting_user') {
     return 'danger'
   }
-  if (status === 'running' || status === 'waiting_start' || status === 'dispatched') {
+  if (status === 'running' || status === 'waiting_start') {
     return 'warning'
   }
   return 'info'
@@ -1431,9 +1430,9 @@ onUnmounted(() => {
           <section class="panel list-panel">
             <div class="panel-heading">
               <h3>已下发任务</h3>
-              <span class="muted">{{ dispatchedTasks.length }} 个任务</span>
+              <span class="muted">{{ issuedTasks.length }} 个任务</span>
             </div>
-            <article v-for="task in dispatchedTasks" :key="task.id" class="item-card">
+            <article v-for="task in issuedTasks" :key="task.id" class="item-card">
               <div>
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
@@ -1447,7 +1446,7 @@ onUnmounted(() => {
                 <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
               </div>
             </article>
-            <el-empty v-if="dispatchedTasks.length === 0" description="暂无已下发任务" />
+            <el-empty v-if="issuedTasks.length === 0" description="暂无已下发任务" />
           </section>
         </div>
       </section>

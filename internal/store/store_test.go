@@ -86,6 +86,46 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if tableExists(t, store, "ticket_groups") {
+		t.Fatal("ticket_groups table should not be created")
+	}
+	if columnExists(t, store, "tasks", "ticket_group_id") {
+		t.Fatal("tasks.ticket_group_id should not be created")
+	}
+
+	for _, column := range []string{
+		"project_id",
+		"project_name",
+		"screen_id",
+		"sku_id",
+		"ticket_display",
+		"ticket_price",
+		"sale_start",
+		"sale_status",
+		"link_id",
+		"is_hot_project",
+		"order_type",
+		"pay_money",
+		"buyer_info",
+		"deliver_info",
+		"time_sync_strategy",
+		"time_offset_ms",
+		"time_synced_at",
+		"poll_interval_ms",
+	} {
+		if !columnExists(t, store, "tasks", column) {
+			t.Fatalf("tasks.%s should exist", column)
+		}
+	}
+}
+
 func TestPauseInterruptedTasks(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
@@ -93,7 +133,7 @@ func TestPauseInterruptedTasks(t *testing.T) {
 	}
 	defer store.Close()
 
-	interruptedStatuses := []string{"waiting_start", "running", "dispatched"}
+	interruptedStatuses := []string{"waiting_start", "running"}
 	interruptedIDs := make([]int64, 0, len(interruptedStatuses))
 	for _, status := range interruptedStatuses {
 		task := createTestTask(t, store, "任务-"+status)
@@ -184,4 +224,50 @@ func createTestTask(t *testing.T, store *Store, name string) model.Task {
 		t.Fatalf("CreateTask %s: %v", name, err)
 	}
 	return task
+}
+
+func tableExists(t *testing.T, store *Store, name string) bool {
+	t.Helper()
+
+	var count int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, name).Scan(&count); err != nil {
+		t.Fatalf("query table %s: %v", name, err)
+	}
+	return count > 0
+}
+
+func columnExists(t *testing.T, store *Store, table string, column string) bool {
+	t.Helper()
+
+	if table != "tasks" {
+		t.Fatalf("unsupported table %s", table)
+	}
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(tasks)`)
+	if err != nil {
+		t.Fatalf("query columns for %s: %v", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan columns for %s: %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate columns for %s: %v", table, err)
+	}
+	return false
 }
