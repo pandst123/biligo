@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 
@@ -23,6 +24,14 @@ func main() {
 		log.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
+
+	pausedTasks, err := db.PauseInterruptedTasks(context.Background())
+	if err != nil {
+		log.Fatalf("pause interrupted tasks: %v", err)
+	}
+	if len(pausedTasks) > 0 {
+		log.Printf("paused %d interrupted task(s) from previous run", len(pausedTasks))
+	}
 
 	router := httpapi.NewRouter(db)
 	log.Printf("biligo server listening on %s", cfg.Server.Addr)

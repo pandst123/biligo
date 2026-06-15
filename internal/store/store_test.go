@@ -85,3 +85,103 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		t.Fatalf("PayMoney = %d, want 140000", task.PayMoney)
 	}
 }
+
+func TestPauseInterruptedTasks(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	interruptedStatuses := []string{"waiting_start", "running", "dispatched"}
+	interruptedIDs := make([]int64, 0, len(interruptedStatuses))
+	for _, status := range interruptedStatuses {
+		task := createTestTask(t, store, "任务-"+status)
+		updated, _, err := store.SetTaskRuntime(context.Background(), task.ID, model.TaskRuntimeUpdate{
+			Status:      status,
+			LastMessage: "运行中",
+		}, "info")
+		if err != nil {
+			t.Fatalf("SetTaskRuntime %s: %v", status, err)
+		}
+		interruptedIDs = append(interruptedIDs, updated.ID)
+	}
+
+	waitingPayment := createTestTask(t, store, "待支付任务")
+	if _, _, err := store.SetTaskRuntime(context.Background(), waitingPayment.ID, model.TaskRuntimeUpdate{
+		Status:      "waiting_payment",
+		LastMessage: "等待用户支付",
+	}, "info"); err != nil {
+		t.Fatalf("SetTaskRuntime waiting_payment: %v", err)
+	}
+	draft := createTestTask(t, store, "草稿任务")
+
+	paused, err := store.PauseInterruptedTasks(context.Background())
+	if err != nil {
+		t.Fatalf("PauseInterruptedTasks: %v", err)
+	}
+	if len(paused) != len(interruptedStatuses) {
+		t.Fatalf("paused len = %d, want %d", len(paused), len(interruptedStatuses))
+	}
+	for index, task := range paused {
+		if task.ID != interruptedIDs[index] {
+			t.Fatalf("paused[%d].ID = %d, want %d", index, task.ID, interruptedIDs[index])
+		}
+		if task.Status != "paused" {
+			t.Fatalf("task %d status = %q, want paused", task.ID, task.Status)
+		}
+		if task.LastMessage != interruptedTaskMessage {
+			t.Fatalf("task %d LastMessage = %q", task.ID, task.LastMessage)
+		}
+		logs, err := store.ListTaskLogs(context.Background(), task.ID)
+		if err != nil {
+			t.Fatalf("ListTaskLogs %d: %v", task.ID, err)
+		}
+		if len(logs) == 0 || logs[0].Level != "warn" || logs[0].Message != interruptedTaskMessage {
+			t.Fatalf("unexpected latest log for task %d: %#v", task.ID, logs)
+		}
+	}
+
+	waitingPayment, err = store.GetTask(context.Background(), waitingPayment.ID)
+	if err != nil {
+		t.Fatalf("GetTask waiting_payment: %v", err)
+	}
+	if waitingPayment.Status != "waiting_payment" {
+		t.Fatalf("waitingPayment status = %q, want waiting_payment", waitingPayment.Status)
+	}
+	draft, err = store.GetTask(context.Background(), draft.ID)
+	if err != nil {
+		t.Fatalf("GetTask draft: %v", err)
+	}
+	if draft.Status != "draft" {
+		t.Fatalf("draft status = %q, want draft", draft.Status)
+	}
+}
+
+func createTestTask(t *testing.T, store *Store, name string) model.Task {
+	t.Helper()
+
+	task, err := store.CreateTask(context.Background(), model.TaskInput{
+		Name:               name,
+		AccountID:          1,
+		ProjectID:          1001701,
+		ProjectName:        "测试项目",
+		ScreenID:           2001,
+		SKUID:              3001,
+		SessionName:        "晚场",
+		TicketLevel:        "VIP",
+		TicketDisplay:      "晚场 - VIP",
+		TicketPrice:        68000,
+		SaleStart:          "2026-06-13 20:00:00",
+		OrderType:          1,
+		BuyerInfo:          []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:              "张三",
+		Tel:                "13800000000",
+		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+		PollIntervalMillis: 1000,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask %s: %v", name, err)
+	}
+	return task
+}

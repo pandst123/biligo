@@ -18,6 +18,8 @@ type Store struct {
 	db *sql.DB
 }
 
+const interruptedTaskMessage = "软件启动时检测到上次抢票未结束，已自动停止任务。"
+
 func Open(path string) (*Store, error) {
 	if path != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -495,6 +497,44 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 func (s *Store) DeleteTask(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, id)
 	return err
+}
+
+func (s *Store) PauseInterruptedTasks(ctx context.Context) ([]model.Task, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id
+		FROM tasks
+		WHERE status IN ('waiting_start', 'running', 'dispatched')
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	tasks := make([]model.Task, 0, len(ids))
+	for _, id := range ids {
+		task, _, err := s.SetTaskRuntime(ctx, id, model.TaskRuntimeUpdate{
+			Status:      "paused",
+			LastMessage: interruptedTaskMessage,
+		}, "warn")
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
 }
 
 func (s *Store) SetTaskStatus(ctx context.Context, id int64, status string, message string, level string) (model.Task, error) {
