@@ -488,10 +488,22 @@ func (h *Handler) deleteTask(c *gin.Context) {
 	if !ok {
 		return
 	}
+	task, err := h.store.GetTask(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
 	h.runner.Cancel(id)
 	if err := h.store.DeleteTask(c.Request.Context(), id); err != nil {
 		respondError(c, err)
 		return
+	}
+	logMessage := "任务已删除。"
+	if name := strings.TrimSpace(task.Name); name != "" {
+		logMessage = fmt.Sprintf("任务已删除：%s。", name)
+	}
+	if log, err := h.store.AddTaskLog(c.Request.Context(), id, "warn", logMessage); err == nil && log.ID > 0 {
+		h.hub.Publish("log.created", log)
 	}
 	h.hub.Publish("task.deleted", gin.H{"id": id})
 	c.Status(http.StatusNoContent)

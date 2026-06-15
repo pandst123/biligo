@@ -743,6 +743,15 @@ async function stopTask(id: number) {
   }, '任务已停止')
 }
 
+async function confirmDeleteTask(task: Task) {
+  const taskName = task.name.trim() || `#${task.id}`
+  const confirmed = window.confirm(`确认删除任务「${taskName}」吗？\n如果任务正在运行，删除会同时停止后台任务。此操作不可撤销。`)
+  if (!confirmed) {
+    return
+  }
+  await deleteTask(task.id)
+}
+
 async function deleteTask(id: number) {
   await run(async () => {
     await api.deleteTask(id)
@@ -1287,7 +1296,7 @@ onUnmounted(() => {
                 </span>
                 <button type="button" @click="editTask(task)">编辑</button>
                 <button type="button" class="primary-button compact" @click="dispatchTask(task.id)">下发</button>
-                <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
+                <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
               </div>
             </article>
             <p v-if="pendingTasks.length === 0" class="empty">暂无待下发任务</p>
@@ -1318,7 +1327,7 @@ onUnmounted(() => {
                   编辑
                 </button>
                 <button type="button" @click="stopTask(task.id)">停止</button>
-                <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
+                <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
               </div>
             </article>
             <p v-if="dispatchedTasks.length === 0" class="empty">暂无已下发任务</p>
@@ -1369,7 +1378,7 @@ onUnmounted(() => {
                     <button type="button" @click="selectTaskLog(task)">日志</button>
                     <button type="button" class="primary-button compact" @click="startTask(task.id)">启动</button>
                     <button type="button" @click="stopTask(task.id)">停止</button>
-                    <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
+                    <button type="button" class="danger-button" @click="confirmDeleteTask(task)">删除</button>
                   </td>
                 </tr>
               </tbody>

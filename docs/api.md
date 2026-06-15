@@ -609,7 +609,7 @@
 
 ### DELETE `/api/tasks/{id}`
 
-删除任务。
+删除任务。若任务正在运行，后端会先取消运行器；删除成功后会写入一条 `warn` 级别运行日志，并通过 SSE 推送 `log.created` 与 `task.deleted` 事件。
 
 响应：`204 No Content`。
 
