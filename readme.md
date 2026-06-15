@@ -1,100 +1,129 @@
 # Biligo
-
 Biligo 是一个 哔哩哔哩会员购 抢票辅助工具
 
-## 温馨提示
-1. Biligo 仅用于个人学习、研究抢票操作。使用者应自行确认使用行为符合平台服务条款。因使用本项目产生的账号限制、订单失败或其他后果，由使用者自行承担。
-2. ⚠️ 本项目采用AI代码辅助构建，项目演进流程请参见`docs/completion.md`
+基于 Go后端API服务 和 Vue3+Element Plus前端服务 构建
 
-## 声明
-若本项目有侵权内容，请联系 535128725@qq.com，我会第一时间下架该项目 
+## 项目特色
+1. 本项目采用网页作为前端控制台, 便于在**无图形界面**的服务器上部署和使用
+2. 本项目API接口完全开放，请见`docs/api.md`，可自由调用API实现自动化操作
+3. 本项目抢票会提前预热连接，开票时节省TCP层耗时，快人一步
+4. 本项目采用计算http 0.5个rtt的时间同步到b站服务器时间，开票时间更精准
+5. 本项目有完善的任务日志，便于观测任务运行情况
 
-## 技术栈
+## 用前需知
+1. Biligo 仅用于**个人学习、研究抢票操作**，严禁用于商业用途。
+2. 禁止使用本软件从事违法行为，包括但不限于批量抢票、黄牛倒票等行为
+3. 使用者应自行确认使用行为**符合平台服务条款**。因使用本项目产生的账号限制、订单失败或其他后果，由使用者自行承担。
 
-| 模块 | 技术 |
-| --- | --- |
-| 后端服务 | Go, Gin |
-| 前端控制台 | Vue 3, Vite, TypeScript |
-| 前端包管理 | pnpm |
-| 数据存储 | SQLite |
-| 实时状态 | SSE |
-| 部署形态 | 本地单用户运行 |
+## 使用方法
 
-## 架构概览
+以下说明面向已经下载或自行编译好的二进制文件。
+
+### 1. 准备文件
+
+建议将程序和配置文件放在同一个目录：
 
 ```text
-Vue Web Console
-      |
-      | HTTP / SSE
-      v
-Gin API Server
-      |
-      +-- Auth Session       登录态与 Cookie 状态
-      +-- Task Scheduler     本地任务调度、启停、恢复
-      +-- Ticket Service     活动、场次、票档监控
-      +-- Order Service      下订单
-      +-- Log / Notify       任务日志、运行事件、用户提示
-      |
-      v
-SQLite
+biligo/
+  biligo          # Linux / macOS
+  biligo.exe      # Windows
+  config.yaml
 ```
 
-## 接口信息
+可以从 `config.example.yaml` 复制一份作为 `config.yaml`。如果启动时没有配置文件，程序会自动生成 `config.yaml`，并在控制台输出面板登录密码。
 
-详见 `docs/api.md`
+### 2. 修改配置
 
-## 直接运行 (开发模式)
-
-开发时可以前后端分别启动。后端默认监听 `:8080`，前端 Vite 开发服务默认监听 `5173`，并将 `/api` 代理到后端。
-
-```bash
-# 启动后端 API
-go run ./cmd/server -config config.yaml
-```
-
-```bash
-# 启动前端开发服务
-cd web
-pnpm install --frozen-lockfile
-pnpm dev
-```
-
-访问 `http://127.0.0.1:5173/` 使用前端控制台。
-
-如果已经使用 `embed_web` 构建了嵌入前端的二进制，则只需要运行后端程序，访问 `server.addr` 对应地址即可，例如 `http://127.0.0.1:8080/`。
-未使用 `embed_web` 构建时，程序会仅提供 API 服务。
-
-## 编译打包
-
-开发模式下，前端和后端可以分别启动。若需要打包为一个可执行文件，并由同一个端口同时提供前端页面和 `/api`，可以使用 `embed_web` 构建标签。
-
-```bash
-cd web
-pnpm install --frozen-lockfile
-pnpm build
-cd ..
-
-rm -rf internal/webui/dist
-mkdir -p internal/webui/dist
-cp -R web/dist/. internal/webui/dist/
-
-GOOS=windows GOARCH=amd64 go build \
-  -tags embed_web \
-  -trimpath \
-  -ldflags="-s -w" \
-  -o release/biligo.exe \
-  ./cmd/server
-```
-
-嵌入前端会自动启用，无需额外配置。端口仍由 `server.addr` 控制：
+常用配置如下：
 
 ```yaml
 server:
   addr: ":8080"
+
+database:
+  path: "data/biligo.db"
+
+auth:
+  password: ""
+
+logging:
+  levels:
+    - info
+    - warn
+    - error
+  color: auto
+  file:
+    enabled: false
+    path: "logs/biligo.log"
 ```
 
-运行后访问 `http://127.0.0.1:8080/`，API 仍位于同端口的 `/api` 下。
+- `server.addr`：服务监听地址和端口，默认 `:8080`。
+- `database.path`：本地 SQLite 数据库路径，默认 `data/biligo.db`。
+- `auth.password`：面板登录密码。留空时会自动生成并写入配置文件。
+- `logging.file.enabled`：是否写入日志文件。
+
+### 3. 启动程序
+
+Linux / macOS 启动：
+
+```bash
+chmod +x ./biligo
+./biligo -config config.yaml
+```
+
+Windows 启动：
+
+```powershell
+.\biligo.exe -config config.yaml
+```
+
+启动后请留意控制台输出：
+
+- 若自动生成了面板密码，会输出密码和写入的配置文件路径。
+- 若二进制已嵌入前端，会提示 Web 控制台使用嵌入前端资源。
+- 若未嵌入前端，会提示仅启用 API 服务。
+
+### 4. 访问面板
+
+默认访问地址：
+
+```text
+http://127.0.0.1:8080/
+```
+
+首次进入面板时输入 `auth.password` 中配置的密码。登录后即可在 Web 控制台中配置账号、查询票务信息、创建任务并查看运行状态。
+
+如果你只拿到了未嵌入前端的二进制文件，则浏览器页面不会由程序提供，但 `/api` 仍可访问，例如：
+
+```text
+http://127.0.0.1:8080/api/health
+```
+
+### 5. 停止程序
+
+在终端中按 `Ctrl+C` 停止服务。下次启动时，如果发现上次未结束的运行任务，程序会自动将其停止，避免误恢复运行。
+
+## 平台尊重原则
+本项目开发者尊重 **哔哩哔哩** 及其会员购票务系统的运营规则、商业权益和公平购票秩序。
+
+Biligo 的目标是作为本地个人学习与研究工具，帮助用户理解票务流程、整理本地配置和观察任务状态，而不是绕过平台规则、规避安全校验或制造不公平竞争。使用本项目时，用户应自行确认相关行为符合平台服务条款、活动购票规则、实名规则及当地法律法规。
+
+本项目不提供、不鼓励也不承诺以下行为：
+
+1. 绕过验证码、人机校验、风控确认、实名确认、支付确认等平台安全机制。
+2. 使用批量账号、批量下单、高频异常请求等方式占用平台资源。
+3. 将本项目用于黄牛倒票、转售牟利、恶意囤票或其他破坏公平购票秩序的用途。
+4. 承诺抢票成功率，或暗示可以稳定规避平台限制。
+
+若平台规则、接口或风控策略发生变化，应优先停止相关自动化能力，并重新评估其合理性与合规性。若本项目存在侵权或不当内容，请联系 535128725@qq.com，我会第一时间处理或下架。
+
+## 开源协议
+本项目采用 **GNU Affero General Public License v3.0** 协议开源，SPDX 标识为 `AGPL-3.0-only`。
+
+你可以在 AGPL-3.0 条款下使用、复制、修改和分发本项目。若你修改本项目并通过网络向他人提供服务，应按照 AGPL-3.0 的要求，向该服务的使用者提供对应版本的源代码。
+
+在使用、分发、修改或部署本项目之前，请自行阅读完整协议文本，并确认你的使用方式符合协议要求。
 
 ## 特别鸣谢
-项目 [biliTickerBuy](https://github.com/mikumifa/biliTickerBuy) 提供抢票相关逻辑
-项目 [BHYG](https://github.com/ZianTT/BHYG) 提供风控监测相关逻辑
+项目 [biliTickerBuy](https://github.com/mikumifa/biliTickerBuy) 提供抢票相关逻辑.  
+项目 [BHYG](https://github.com/ZianTT/BHYG) 提供风控监测相关逻辑.
