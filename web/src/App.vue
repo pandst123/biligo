@@ -916,7 +916,6 @@ async function fetchTicketProject() {
     }
     const previousTicketValue = selectedTicketValue.value
     const previousTicketValues = [...selectedTicketValues.value]
-    const shouldUpdateTaskName = shouldReplaceAutoTaskName(taskForm.name, taskForm.projectName || fetchedTicketProject.value?.projectName || '')
     const project = await api.fetchTicketProject({
       projectInput,
       accountId: 0,
@@ -929,19 +928,17 @@ async function fetchTicketProject() {
     clearPurchaseFields()
     selectedTicketValues.value = previousTicketValues.filter((value) => ticketOptions.value.some((ticket) => ticket.value === value))
     if (hasRestockTaskSection.value && selectedTicketValues.value.length > 0) {
-      applySelectedRestockTickets(shouldUpdateTaskName)
+      applySelectedRestockTickets(true)
     } else if (previousTicketValue && ticketOptions.value.some((ticket) => ticket.value === previousTicketValue)) {
       selectedTicketValue.value = previousTicketValue
-      selectTicketOption(shouldUpdateTaskName)
+      selectTicketOption(true)
     } else {
       selectedTicketValue.value = ''
       selectedTicketValues.value = []
       clearSelectedTicketFields()
-      if (shouldUpdateTaskName) {
-        taskForm.projectId = project.projectId
-        taskForm.projectName = project.projectName
-        taskForm.name = autoTaskName(project.projectName)
-      }
+      taskForm.projectId = project.projectId
+      taskForm.projectName = project.projectName
+      taskForm.name = autoTaskName(project.projectName)
     }
     ticketProjectHistories.value = await api.listTicketProjectHistory()
   }, '票务信息已获取')
@@ -1052,15 +1049,6 @@ function autoTaskName(projectName: string, ticket?: TicketOption) {
     return [projectName, '抢票+回流'].filter(Boolean).join(' ')
   }
   return [projectName, ticket?.screenName, ticket?.ticketLevel].filter(Boolean).join(' ')
-}
-
-function shouldReplaceAutoTaskName(currentName: string, previousProjectName: string) {
-  const name = currentName.trim()
-  const projectName = previousProjectName.trim()
-  if (!name) {
-    return true
-  }
-  return projectName !== '' && (name === projectName || name.startsWith(`${projectName} `))
 }
 
 function defaultEndAtFromSaleStart(saleStart: string) {
