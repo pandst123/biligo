@@ -1687,7 +1687,6 @@ onUnmounted(() => {
             <span>{{ selectedTicketOption.ticketLevel }}</span>
             <span>{{ selectedTicketOption.priceText }}</span>
             <span>{{ selectedTicketOption.saleStatus }}</span>
-            <span>clickable: {{ selectedTicketOption.clickable ? 'true' : 'false' }}</span>
           </div>
           <div v-if="isRestockTaskForm && selectedTicketOptions.length > 0" class="ticket-detail-grid">
             <span>已选 {{ selectedTicketOptions.length }} 个票种</span>
