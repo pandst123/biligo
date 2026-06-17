@@ -188,6 +188,7 @@ export interface Task {
   taskMode: string
   durationMode: string
   selectedTickets: TicketOption[]
+  rushDurationSeconds: number
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]
@@ -230,6 +231,7 @@ export interface TaskInput {
   taskMode: string
   durationMode: string
   selectedTickets: TicketOption[]
+  rushDurationSeconds: number
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]

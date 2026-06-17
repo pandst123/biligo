@@ -76,7 +76,8 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 		return model.Task{}, errors.New("账号未保存 Cookie")
 	}
 
-	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRush {
+	taskMode := model.NormalizeTaskMode(task.TaskMode)
+	if taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid {
 		task, err = m.syncTaskTime(ctx, task)
 		if err != nil {
 			return model.Task{}, err
@@ -94,9 +95,11 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 
 	status := "waiting_start"
 	message := "任务已下发，等待票档起售时间。"
-	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRestock {
+	if taskMode == model.TaskModeRestock {
 		status = "running"
 		message = "回流捡漏任务已下发，开始检测票档状态。"
+	} else if taskMode == model.TaskModeHybrid {
+		message = "抢票+回流捡漏任务已下发，等待票档起售时间。"
 	}
 	task, log, err := m.store.SetTaskRuntime(ctx, taskID, model.TaskRuntimeUpdate{
 		Status:      status,
@@ -150,8 +153,12 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 	if err != nil {
 		return
 	}
-	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRestock {
+	switch model.NormalizeTaskMode(task.TaskMode) {
+	case model.TaskModeRestock:
 		m.runRestock(ctx, taskID, cookie, task)
+		return
+	case model.TaskModeHybrid:
+		m.runHybrid(ctx, taskID, cookie, task)
 		return
 	}
 	m.runRush(ctx, taskID, cookie, task)
@@ -183,6 +190,56 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 		return nowWithOffset(timeOffset).After(endAt)
 	}
 	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded)
+}
+
+func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, task model.Task) {
+	saleStart, err := parseTaskTime(task.SaleStart)
+	if err != nil {
+		m.setRuntime(taskID, "failed", "无法解析票档起售时间："+err.Error(), "error")
+		return
+	}
+	rushDuration := time.Duration(task.RushDurationSeconds) * time.Second
+	if rushDuration <= 0 {
+		rushDuration = time.Duration(model.DefaultRushDurationSeconds) * time.Second
+	}
+	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
+
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset) {
+		return
+	}
+
+	m.setRuntime(taskID, "running", fmt.Sprintf("已到起售时间，开始抢票；%d 秒后切换回流捡漏。", int(rushDuration.Seconds())), "info")
+	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	switchMessage := "抢票窗口结束，切换回流捡漏。"
+	var rushStartedAt time.Time
+	markRushStarted := func() {
+		if rushStartedAt.IsZero() {
+			rushStartedAt = nowWithOffset(timeOffset)
+		}
+	}
+	deadlineExceeded := func() bool {
+		if rushStartedAt.IsZero() {
+			return false
+		}
+		return !nowWithOffset(timeOffset).Before(rushStartedAt.Add(rushDuration))
+	}
+	if m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage) {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	latestTask, err := m.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return
+	}
+	if latestTask.Status == "running" && latestTask.LastMessage == switchMessage {
+		m.runRestock(ctx, taskID, cookie, latestTask)
+	}
 }
 
 func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, task model.Task) {
@@ -252,12 +309,16 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 }
 
 func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool) bool {
+	return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。")
+}
+
+func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string) bool {
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
 		if deadlineExceeded != nil && deadlineExceeded() {
-			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
+			m.setRuntime(taskID, deadlineStatus, deadlineMessage, deadlineLevel)
 			return false
 		}
 
@@ -267,6 +328,9 @@ func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string,
 		}
 		checkedAt := checkedAtText()
 
+		if beforeAttempt != nil {
+			beforeAttempt()
+		}
 		prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			if !m.retryRunError(ctx, taskID, "订单准备失败："+err.Error(), checkedAt, interval) {
@@ -298,7 +362,7 @@ func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string,
 			}
 			continue
 		}
-		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded)
+		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel)
 		if !ok {
 			return false
 		}
@@ -370,7 +434,7 @@ func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie stri
 	if interval <= 0 {
 		interval = time.Second
 	}
-	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded)
+	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn")
 	if !ok {
 		return orderAttemptStopped
 	}
@@ -404,13 +468,13 @@ func (m *Manager) retryRunError(ctx context.Context, taskID int64, message strin
 	return m.wait(ctx, interval)
 }
 
-func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool) (biliticket.PayParamResult, bool) {
+func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string) (biliticket.PayParamResult, bool) {
 	for {
 		if ctx.Err() != nil {
 			return biliticket.PayParamResult{}, false
 		}
 		if deadlineExceeded != nil && deadlineExceeded() {
-			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止获取支付参数。", "warn")
+			m.setRuntime(taskID, deadlineStatus, deadlineMessage, deadlineLevel)
 			return biliticket.PayParamResult{}, false
 		}
 		payParam, err := m.ticket.GetPayParam(ctx, orderID, cookie)
@@ -596,16 +660,21 @@ func validateTask(task model.Task) error {
 	}
 	taskMode := model.NormalizeTaskMode(task.TaskMode)
 	durationMode := model.NormalizeDurationMode(task.DurationMode)
-	if taskMode == model.TaskModeRestock && len(task.SelectedTickets) == 0 {
+	hasRushStage := taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid
+	hasRestockStage := taskMode == model.TaskModeRestock || taskMode == model.TaskModeHybrid
+	if hasRestockStage && len(task.SelectedTickets) == 0 {
 		return errors.New("回流蹲票模式请至少选择一个票种")
 	}
-	if taskMode == model.TaskModeRush && (task.ScreenID <= 0 || task.SKUID <= 0) {
+	if hasRushStage && (task.ScreenID <= 0 || task.SKUID <= 0) {
 		return errors.New("请先获取票务信息并选择票信息")
 	}
-	if taskMode == model.TaskModeRush && strings.TrimSpace(task.SaleStart) == "" {
+	if hasRushStage && strings.TrimSpace(task.SaleStart) == "" {
 		return errors.New("票档缺少起售时间")
 	}
-	if taskMode == model.TaskModeRestock && durationMode == model.DurationModeLimited {
+	if taskMode == model.TaskModeHybrid && task.RushDurationSeconds <= 0 {
+		return errors.New("抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数")
+	}
+	if hasRestockStage && durationMode == model.DurationModeLimited {
 		if _, err := parseTaskTime(task.EndAt); err != nil {
 			return errors.New("回流捡漏有限模式需要设置合法截止时间")
 		}

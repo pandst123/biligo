@@ -82,6 +82,43 @@ func TestValidateRestockTaskRequiresSelectedTickets(t *testing.T) {
 	}
 }
 
+func TestValidateHybridTaskRequirements(t *testing.T) {
+	task := model.Task{
+		AccountID:           1,
+		ProjectID:           1001701,
+		ScreenID:            2001,
+		SKUID:               3001,
+		SaleStart:           "2026-06-13 20:00:00",
+		TaskMode:            model.TaskModeHybrid,
+		DurationMode:        model.DurationModeUnlimited,
+		SelectedTickets:     []model.TicketOption{{ProjectID: 1001701, ScreenID: 2001, SKUID: 3001}},
+		RushDurationSeconds: 600,
+		BuyerInfo:           []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:               "张三",
+		Tel:                 "13800000000",
+		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+	}
+	if err := validateTask(task); err != nil {
+		t.Fatalf("validateTask returned error: %v", err)
+	}
+
+	task.SelectedTickets = nil
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for hybrid task without restock tickets")
+	}
+	task.SelectedTickets = []model.TicketOption{{ProjectID: 1001701, ScreenID: 2001, SKUID: 3001}}
+	task.RushDurationSeconds = 0
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for hybrid task without rush duration")
+	}
+	task.RushDurationSeconds = 600
+	task.DurationMode = model.DurationModeLimited
+	task.EndAt = ""
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for hybrid limited task without end time")
+	}
+}
+
 func TestParseTaskTimeAcceptsSaleStartFormat(t *testing.T) {
 	parsed, err := parseTaskTime("2026-06-13 20:00:00")
 	if err != nil {
@@ -692,6 +729,93 @@ func TestRestockUnlimitedModeAllowsEmptyEndTime(t *testing.T) {
 	}
 }
 
+func TestHybridModeRushSuccessDoesNotEnterRestock(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			statusCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-HYBRID-RUSH", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-HYBRID-RUSH"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createHybridTask(t, 600, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-HYBRID-RUSH" {
+		t.Fatalf("OrderID = %q, want ORDER-HYBRID-RUSH", updated.OrderID)
+	}
+	if statusCalls.Load() != 0 {
+		t.Fatalf("restock status calls = %d, want 0", statusCalls.Load())
+	}
+}
+
+func TestHybridModeSwitchesToRestockAfterRushWindow(t *testing.T) {
+	var infoCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			infoCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			if infoCalls.Load() == 0 {
+				writeRunnerJSON(t, w, map[string]any{"code": 100009, "message": "stock not enough"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-HYBRID-RESTOCK", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-HYBRID-RESTOCK"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createHybridTaskAt(t, time.Now().Add(-10*time.Second), 1, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-HYBRID-RESTOCK" {
+		t.Fatalf("OrderID = %q, want ORDER-HYBRID-RESTOCK", updated.OrderID)
+	}
+	if prepareCalls.Load() < 2 {
+		t.Fatalf("prepare calls = %d, want rush and restock attempts", prepareCalls.Load())
+	}
+	if infoCalls.Load() == 0 {
+		t.Fatal("restock ticket status was not checked after rush window")
+	}
+}
+
 func createRunnableTask(t *testing.T) (*store.Store, model.Task) {
 	t.Helper()
 	return createRunnableTaskAt(t, time.Now().Add(-time.Second))
@@ -784,6 +908,58 @@ func createRestockTaskWithTickets(t *testing.T, durationMode string, endAt strin
 		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
 		EndAt:              endAt,
 		PollIntervalMillis: 30,
+	})
+	if err != nil {
+		taskStore.Close()
+		t.Fatalf("CreateTask: %v", err)
+	}
+	return taskStore, task
+}
+
+func createHybridTask(t *testing.T, rushDurationSeconds int, durationMode string, endAt string) (*store.Store, model.Task) {
+	t.Helper()
+	return createHybridTaskAt(t, time.Now().Add(-time.Second), rushDurationSeconds, durationMode, endAt)
+}
+
+func createHybridTaskAt(t *testing.T, saleStart time.Time, rushDurationSeconds int, durationMode string, endAt string) (*store.Store, model.Task) {
+	t.Helper()
+
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	account, err := taskStore.CreateAccountWithStatus(context.Background(), model.AccountInput{
+		Name:   "测试账号",
+		Cookie: "SESSDATA=test",
+	}, "logged_in")
+	if err != nil {
+		taskStore.Close()
+		t.Fatalf("CreateAccountWithStatus: %v", err)
+	}
+	task, err := taskStore.CreateTask(context.Background(), model.TaskInput{
+		Name:                "组合任务",
+		AccountID:           account.ID,
+		ProjectID:           1001701,
+		ProjectName:         "测试项目",
+		ScreenID:            2001,
+		SKUID:               3001,
+		SessionName:         "晚场",
+		TicketLevel:         "VIP",
+		TicketDisplay:       "晚场 - VIP",
+		TicketPrice:         68000,
+		SaleStart:           saleStart.Format("2006-01-02 15:04:05"),
+		SaleStatus:          "未开始",
+		TaskMode:            model.TaskModeHybrid,
+		DurationMode:        durationMode,
+		SelectedTickets:     []model.TicketOption{{Value: "1001701:2001:3001:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3001, ScreenName: "晚场", TicketLevel: "VIP", Price: 68000}},
+		RushDurationSeconds: rushDurationSeconds,
+		OrderType:           1,
+		BuyerInfo:           []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
+		Buyer:               "张三",
+		Tel:                 "13800000000",
+		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
+		EndAt:               endAt,
+		PollIntervalMillis:  50,
 	})
 	if err != nil {
 		taskStore.Close()

@@ -321,6 +321,48 @@ p {
   font-size: 14px;
 }
 
+.task-mode-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e1dbcf;
+  border-radius: 8px;
+  background: #fffaf2;
+}
+
+.switch-section {
+  background: #f7fbf8;
+  border-color: #cfded3;
+}
+
+.subsection-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subsection-heading h4 {
+  font-size: 15px;
+}
+
+.subsection-heading span {
+  color: #77736c;
+  font-size: 12px;
+}
+
+.inline-number-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: #5b5d64;
+}
+
+.inline-number-row .el-input-number {
+  width: 150px;
+}
+
 .form-tip-alert {
   border: 1px solid #d8d2c7;
   background: #fbf7ef;

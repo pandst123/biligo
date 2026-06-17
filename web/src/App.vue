@@ -116,6 +116,7 @@ const taskForm = reactive<TaskInput>({
   taskMode: 'rush',
   durationMode: 'limited',
   selectedTickets: [],
+  rushDurationSeconds: 600,
   orderType: 1,
   payMoney: 0,
   buyerInfo: [],
@@ -160,15 +161,18 @@ const selectedTicketOptions = computed(() =>
 )
 const hasFetchedTicketInfo = computed(() => Boolean(fetchedTicketProject.value?.projectId && ticketOptions.value.length > 0))
 const isRestockTaskForm = computed(() => taskForm.taskMode === 'restock')
-const isRestockUnlimitedTaskForm = computed(() => taskForm.taskMode === 'restock' && taskForm.durationMode === 'unlimited')
+const isHybridTaskForm = computed(() => taskForm.taskMode === 'rush_restock')
+const hasRushTaskSection = computed(() => taskForm.taskMode === 'rush' || taskForm.taskMode === 'rush_restock')
+const hasRestockTaskSection = computed(() => taskForm.taskMode === 'restock' || taskForm.taskMode === 'rush_restock')
+const isRestockUnlimitedTaskForm = computed(() => hasRestockTaskSection.value && taskForm.durationMode === 'unlimited')
 const canSaveTask = computed(
   () =>
     taskForm.name.trim() !== '' &&
     taskForm.accountId > 0 &&
-    ((isRestockTaskForm.value && taskForm.selectedTickets.length > 0) ||
-      (!isRestockTaskForm.value && taskForm.ticketDisplay.trim() !== '' && taskForm.skuId > 0)) &&
-    (isRestockTaskForm.value || taskForm.saleStart.trim() !== '') &&
-    (!isRestockTaskForm.value || taskForm.durationMode !== 'limited' || taskForm.endAt.trim() !== '') &&
+    (!hasRushTaskSection.value || (taskForm.ticketDisplay.trim() !== '' && taskForm.skuId > 0 && taskForm.saleStart.trim() !== '')) &&
+    (!hasRestockTaskSection.value || taskForm.selectedTickets.length > 0) &&
+    (!isHybridTaskForm.value || taskForm.rushDurationSeconds > 0) &&
+    (!hasRestockTaskSection.value || taskForm.durationMode !== 'limited' || taskForm.endAt.trim() !== '') &&
     taskForm.buyerInfo.length > 0 &&
     Boolean(taskForm.deliverInfo?.id) &&
     taskForm.buyer.trim() !== '' &&
@@ -551,6 +555,7 @@ function resetTaskForm() {
     taskMode: 'rush',
     durationMode: 'limited',
     selectedTickets: [],
+    rushDurationSeconds: 600,
     orderType: 1,
     payMoney: 0,
     buyerInfo: [],
@@ -586,6 +591,7 @@ function editTask(task: Task) {
     taskMode: task.taskMode || 'rush',
     durationMode: task.durationMode || 'limited',
     selectedTickets: task.selectedTickets ?? [],
+    rushDurationSeconds: task.rushDurationSeconds || 600,
     orderType: task.orderType,
     payMoney: task.payMoney,
     buyerInfo: task.buyerInfo ?? [],
@@ -605,19 +611,22 @@ function editTask(task: Task) {
 
 async function saveTask() {
   await run(async () => {
-    if (taskForm.taskMode === 'restock') {
+    if (hasRestockTaskSection.value) {
       applySelectedRestockTickets()
     }
-    if (taskForm.taskMode !== 'restock' && (!taskForm.ticketDisplay || taskForm.skuId <= 0)) {
+    if (hasRushTaskSection.value && (!taskForm.ticketDisplay || taskForm.skuId <= 0)) {
       throw new Error('请先获取票务信息并选择票信息')
     }
-    if (taskForm.taskMode === 'restock' && taskForm.selectedTickets.length === 0) {
+    if (hasRestockTaskSection.value && taskForm.selectedTickets.length === 0) {
       throw new Error('回流蹲票模式请至少选择一个票种')
     }
-    if (taskForm.taskMode === 'rush' && !taskForm.saleStart.trim()) {
+    if (hasRushTaskSection.value && !taskForm.saleStart.trim()) {
       throw new Error('抢票模式需要票档起售时间')
     }
-    if (taskForm.taskMode === 'restock' && taskForm.durationMode === 'limited' && !taskForm.endAt.trim()) {
+    if (isHybridTaskForm.value && taskForm.rushDurationSeconds <= 0) {
+      throw new Error('抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数')
+    }
+    if (hasRestockTaskSection.value && taskForm.durationMode === 'limited' && !taskForm.endAt.trim()) {
       throw new Error('回流捡漏有限模式需要设置截止时间')
     }
     if (taskForm.buyerInfo.length === 0 || !taskForm.deliverInfo?.id) {
@@ -664,19 +673,25 @@ function clearSelectedTicketFields() {
     linkId: 0,
     isHotProject: false,
     selectedTickets: [],
+    rushDurationSeconds: 600,
     payMoney: 0,
     endAt: '',
   })
 }
 
 function normalizeTaskModeFields() {
-  if (taskForm.taskMode !== 'restock') {
+  if (!['rush', 'restock', 'rush_restock'].includes(taskForm.taskMode)) {
     taskForm.taskMode = 'rush'
+  }
+  if (!hasRestockTaskSection.value) {
     taskForm.durationMode = 'limited'
     taskForm.selectedTickets = selectedTicketOption.value ? [selectedTicketOption.value] : []
     return
   }
   applySelectedRestockTickets()
+  if (taskForm.rushDurationSeconds <= 0) {
+    taskForm.rushDurationSeconds = 600
+  }
   if (taskForm.durationMode !== 'unlimited') {
     taskForm.durationMode = 'limited'
     return
@@ -686,11 +701,15 @@ function normalizeTaskModeFields() {
 
 function handleTaskModeChange() {
   normalizeTaskModeFields()
-  if (taskForm.taskMode === 'restock' && selectedTicketValue.value && selectedTicketValues.value.length === 0) {
+  if (hasRestockTaskSection.value && selectedTicketValue.value && selectedTicketValues.value.length === 0) {
     selectedTicketValues.value = [selectedTicketValue.value]
     applySelectedRestockTickets()
   }
-  if (taskForm.taskMode === 'rush' && selectedTicketOption.value && !taskForm.endAt) {
+  if (hasRushTaskSection.value && !selectedTicketValue.value && selectedTicketValues.value.length > 0) {
+    selectedTicketValue.value = selectedTicketValues.value[0]
+    selectTicketOption()
+  }
+  if (hasRushTaskSection.value && selectedTicketOption.value && !hasRestockTaskSection.value && !taskForm.endAt) {
     taskForm.endAt = defaultEndAtFromSaleStart(selectedTicketOption.value.saleStart)
   }
 }
@@ -798,7 +817,7 @@ async function fetchTicketProject() {
     ticketAddresses.value = []
     clearPurchaseFields()
     selectedTicketValues.value = previousTicketValues.filter((value) => ticketOptions.value.some((ticket) => ticket.value === value))
-    if (taskForm.taskMode === 'restock' && selectedTicketValues.value.length > 0) {
+    if (hasRestockTaskSection.value && selectedTicketValues.value.length > 0) {
       applySelectedRestockTickets()
     } else if (previousTicketValue && ticketOptions.value.some((ticket) => ticket.value === previousTicketValue)) {
       selectedTicketValue.value = previousTicketValue
@@ -874,13 +893,25 @@ function applySelectedRestockTickets() {
   const tickets = selectedTicketOptions.value
   taskForm.selectedTickets = tickets
   if (tickets.length === 0) {
-    clearSelectedTicketFields()
+    if (isRestockTaskForm.value) {
+      clearSelectedTicketFields()
+    }
     return
   }
   if (!fetchedTicketProject.value) {
     return
   }
   const primary = tickets[0]
+  if (!isRestockTaskForm.value) {
+    taskForm.projectId = primary.projectId
+    taskForm.projectName = fetchedTicketProject.value.projectName
+    if (!taskForm.name.trim()) {
+      taskForm.name = [fetchedTicketProject.value.projectName, '抢票+回流']
+        .filter(Boolean)
+        .join(' ')
+    }
+    return
+  }
   Object.assign(taskForm, {
     projectId: primary.projectId,
     projectName: fetchedTicketProject.value.projectName,
@@ -934,10 +965,14 @@ function taskBuyerSummary(task: Task) {
 
 function taskTicketSummary(task: Task) {
   const selectedTickets = task.selectedTickets ?? []
-  if (task.taskMode === 'restock' && selectedTickets.length > 0) {
+  if ((task.taskMode === 'restock' || task.taskMode === 'rush_restock') && selectedTickets.length > 0) {
     const names = selectedTickets.map((ticket) => ticket.display || `${ticket.screenName || '-'} / ${ticket.ticketLevel || '-'}`)
     const preview = names.slice(0, 2).join('、')
     const suffix = names.length > 2 ? ` 等 ${names.length} 个` : `${names.length} 个`
+    if (task.taskMode === 'rush_restock') {
+      const rush = task.ticketDisplay || `${task.sessionName || '-'} / ${task.ticketLevel || '-'}`
+      return `抢票：${rush}；${task.rushDurationSeconds || 600} 秒后回流：${preview}（${suffix}）`
+    }
     const current = task.ticketDisplay ? `；当前：${task.ticketDisplay}` : ''
     return `回流票种：${preview}（${suffix}）${current}`
   }
@@ -1026,7 +1061,7 @@ function restoreTicketSelectionFromTask(task: Task) {
   }
   ticketOptions.value = restoredOptions
   selectedTicketValue.value = restored?.value ?? restoredOptions[0]?.value ?? ''
-  selectedTicketValues.value = task.taskMode === 'restock'
+  selectedTicketValues.value = (task.taskMode === 'restock' || task.taskMode === 'rush_restock')
     ? restoredSelectedTickets.map((ticket) => ticket.value)
     : selectedTicketValue.value ? [selectedTicketValue.value] : []
   ticketBuyers.value = task.buyerInfo ?? []
@@ -1197,6 +1232,28 @@ function countdownText(task: Task) {
     }
     return `剩余${formatDuration(remaining)}`
   }
+  if (task.taskMode === 'rush_restock') {
+    const saleStart = parseTaskTime(task.saleStart)
+    if (!saleStart) {
+      return '-'
+    }
+    const saleRemaining = saleStart.getTime() - calibratedNowMs(task)
+    if (saleRemaining > 0) {
+      return formatDuration(saleRemaining)
+    }
+    if (task.durationMode === 'unlimited') {
+      return '抢票/回流中'
+    }
+    const endAt = parseTaskTime(task.endAt)
+    if (!endAt) {
+      return '未设置截止时间'
+    }
+    const remaining = endAt.getTime() - nowMs.value
+    if (remaining <= 0) {
+      return '已到截止时间'
+    }
+    return `回流剩余${formatDuration(remaining)}`
+  }
   const target = parseTaskTime(task.saleStart)
   if (!target) {
     return '-'
@@ -1243,6 +1300,13 @@ function timeSyncSummary(task: Task) {
   if (task.taskMode === 'restock') {
     return task.durationMode === 'unlimited' ? '回流捡漏 · 无限模式' : `回流捡漏 · 截止 ${task.endAt || '-'}`
   }
+  if (task.taskMode === 'rush_restock') {
+    const restock = task.durationMode === 'unlimited' ? '无限回流' : `回流截止 ${task.endAt || '-'}`
+    const sync = task.timeSyncedAt
+      ? `${timeSyncStrategyLabel(task.timeSyncStrategy)} · offset ${(task.timeOffsetMillis || 0) >= 0 ? '+' : ''}${task.timeOffsetMillis || 0}ms`
+      : `${timeSyncStrategyLabel(task.timeSyncStrategy)} · 未同步`
+    return `抢票+回流 · ${task.rushDurationSeconds || 600}秒后切换 · ${restock} · ${sync}`
+  }
   if (!task.timeSyncedAt) {
     return `${timeSyncStrategyLabel(task.timeSyncStrategy)} · 未同步`
   }
@@ -1267,11 +1331,23 @@ function lastCheckedText(value: string) {
 }
 
 function taskModeLabel(task: Pick<Task, 'taskMode'>) {
-  return task.taskMode === 'restock' ? '回流捡漏' : '抢票'
+  if (task.taskMode === 'restock') {
+    return '回流捡漏'
+  }
+  if (task.taskMode === 'rush_restock') {
+    return '抢票+回流'
+  }
+  return '抢票'
 }
 
 function taskModeTagType(task: Pick<Task, 'taskMode'>) {
-  return task.taskMode === 'restock' ? 'warning' : 'info'
+  if (task.taskMode === 'restock') {
+    return 'warning'
+  }
+  if (task.taskMode === 'rush_restock') {
+    return 'success'
+  }
+  return 'info'
 }
 
 async function copyPaymentUrl(task: Task) {
@@ -1604,6 +1680,7 @@ onUnmounted(() => {
             <el-radio-group v-model="taskForm.taskMode" @change="handleTaskModeChange">
               <el-radio-button label="rush">抢票模式</el-radio-button>
               <el-radio-button label="restock">回流捡漏模式</el-radio-button>
+              <el-radio-button label="rush_restock">抢票+回流捡漏模式</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="isRestockTaskForm" required label="回流捡漏时长">
@@ -1646,52 +1723,145 @@ onUnmounted(() => {
               {{ fetchedTicketProject.startAt || '-' }} 至 {{ fetchedTicketProject.endAt || '-' }}
             </span>
           </div>
-          <el-form-item v-if="!isRestockTaskForm" required label="票信息">
-            <el-select
-              v-model="selectedTicketValue"
-              :disabled="ticketOptions.length === 0"
-              placeholder="选择票信息"
-              filterable
-              @change="selectTicketOption"
+
+          <template v-if="taskForm.taskMode === 'rush'">
+            <el-form-item required label="票信息">
+              <el-select
+                v-model="selectedTicketValue"
+                :disabled="ticketOptions.length === 0"
+                placeholder="选择票信息"
+                filterable
+                @change="selectTicketOption"
+              >
+                <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+              </el-select>
+            </el-form-item>
+            <div v-if="selectedTicketOption" class="ticket-detail-grid">
+              <span>{{ selectedTicketOption.screenName }}</span>
+              <span>{{ selectedTicketOption.ticketLevel }}</span>
+              <span>{{ selectedTicketOption.priceText }}</span>
+              <span>{{ selectedTicketOption.saleStatus }}</span>
+            </div>
+          </template>
+
+          <template v-if="isRestockTaskForm">
+            <el-form-item required label="回流票种">
+              <el-select
+                v-model="selectedTicketValues"
+                :disabled="ticketOptions.length === 0"
+                placeholder="选择一个或多个票种"
+                filterable
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                @change="selectRestockTickets"
+              >
+                <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+              </el-select>
+            </el-form-item>
+            <el-alert type="info" show-icon :closable="false" class="form-tip-alert">
+              <template #title>
+                若选择多个票种，则按每次检测中第一个可购买的票种下单。
+              </template>
+            </el-alert>
+            <div v-if="selectedTicketOptions.length > 0" class="ticket-detail-grid">
+              <span>已选 {{ selectedTicketOptions.length }} 个票种</span>
+              <span v-for="ticket in selectedTicketOptions" :key="ticket.value">{{ ticket.display }}</span>
+            </div>
+          </template>
+
+          <section v-if="isHybridTaskForm" class="task-mode-section">
+            <div class="subsection-heading">
+              <h4>抢票阶段</h4>
+              <span>等待起售后直接提交订单</span>
+            </div>
+            <el-form-item required label="抢票票种">
+              <el-select
+                v-model="selectedTicketValue"
+                :disabled="ticketOptions.length === 0"
+                placeholder="选择抢票票种"
+                filterable
+                @change="selectTicketOption"
+              >
+                <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+              </el-select>
+            </el-form-item>
+            <div v-if="selectedTicketOption" class="ticket-detail-grid">
+              <span>{{ selectedTicketOption.screenName }}</span>
+              <span>{{ selectedTicketOption.ticketLevel }}</span>
+              <span>{{ selectedTicketOption.priceText }}</span>
+              <span>{{ selectedTicketOption.saleStatus }}</span>
+            </div>
+            <el-row :gutter="12">
+              <el-col :xs="24" :sm="12">
+                <el-form-item label="时间同步策略">
+                  <el-select v-model="taskForm.timeSyncStrategy">
+                    <el-option value="bilibili" label="哔哩哔哩时间" />
+                    <el-option value="local" label="本地时间" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :sm="12">
+                <el-form-item required label="起售时间">
+                  <el-input :model-value="taskForm.saleStart" disabled />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-alert type="info" show-icon :closable="false" class="form-tip-alert">
+              <template #title>
+                <strong>时间同步提示</strong>
+              </template>
+              <div class="tip-copy">
+                <span>默认在任务下发时请求哔哩哔哩时间接口同步。</span>
+                <span>建议距离开票时间大于 1 分钟时使用，时间过近可切换本地时间。</span>
+              </div>
+            </el-alert>
+          </section>
+
+          <section v-if="isHybridTaskForm" class="task-mode-section switch-section">
+            <el-form-item required label="模式切换">
+              <div class="inline-number-row">
+                <span>开始抢票</span>
+                <el-input-number v-model="taskForm.rushDurationSeconds" :min="1" controls-position="right" />
+                <span>秒后变成回流捡漏</span>
+              </div>
+            </el-form-item>
+          </section>
+
+          <section v-if="isHybridTaskForm" class="task-mode-section">
+            <div class="subsection-heading">
+              <h4>回流捡漏阶段</h4>
+              <span>每轮检测票种 clickable 状态</span>
+            </div>
+            <el-form-item required label="回流票种">
+              <el-select
+                v-model="selectedTicketValues"
+                :disabled="ticketOptions.length === 0"
+                placeholder="选择一个或多个票种"
+                filterable
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                @change="selectRestockTickets"
+              >
+                <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+              </el-select>
+            </el-form-item>
+            <el-alert
+              type="info"
+              show-icon
+              :closable="false"
+              class="form-tip-alert"
             >
-              <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
-            </el-select>
-          </el-form-item>
-          <el-form-item v-else required label="回流票种">
-            <el-select
-              v-model="selectedTicketValues"
-              :disabled="ticketOptions.length === 0"
-              placeholder="选择一个或多个票种"
-              filterable
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
-              @change="selectRestockTickets"
-            >
-              <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
-            </el-select>
-          </el-form-item>
-          <el-alert
-            v-if="isRestockTaskForm"
-            type="info"
-            show-icon
-            :closable="false"
-            class="form-tip-alert"
-          >
-            <template #title>
-              若选择多个票种，则按每次检测中第一个可购买的票种下单。
-            </template>
-          </el-alert>
-          <div v-if="!isRestockTaskForm && selectedTicketOption" class="ticket-detail-grid">
-            <span>{{ selectedTicketOption.screenName }}</span>
-            <span>{{ selectedTicketOption.ticketLevel }}</span>
-            <span>{{ selectedTicketOption.priceText }}</span>
-            <span>{{ selectedTicketOption.saleStatus }}</span>
-          </div>
-          <div v-if="isRestockTaskForm && selectedTicketOptions.length > 0" class="ticket-detail-grid">
-            <span>已选 {{ selectedTicketOptions.length }} 个票种</span>
-            <span v-for="ticket in selectedTicketOptions" :key="ticket.value">{{ ticket.display }}</span>
-          </div>
+              <template #title>
+                若选择多个票种，则按每次检测中第一个可购买的票种下单。
+              </template>
+            </el-alert>
+            <div v-if="selectedTicketOptions.length > 0" class="ticket-detail-grid">
+              <span>已选 {{ selectedTicketOptions.length }} 个票种</span>
+              <span v-for="ticket in selectedTicketOptions" :key="ticket.value">{{ ticket.display }}</span>
+            </div>
+          </section>
           <el-form-item required label="账号">
             <div class="input-action-row">
               <el-select v-model="taskForm.accountId" placeholder="未选择" @change="handleTaskAccountChange">
@@ -1757,7 +1927,7 @@ onUnmounted(() => {
                 <el-input-number v-model="taskForm.pollIntervalMillis" :min="1" controls-position="right" class="full-input" />
               </el-form-item>
             </el-col>
-            <el-col v-if="!isRestockTaskForm" :xs="24" :sm="12">
+            <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item label="时间同步策略">
                 <el-select v-model="taskForm.timeSyncStrategy">
                   <el-option value="bilibili" label="哔哩哔哩时间" />
@@ -1766,7 +1936,7 @@ onUnmounted(() => {
               </el-form-item>
             </el-col>
           </el-row>
-          <el-alert v-if="!isRestockTaskForm" type="info" show-icon :closable="false" class="form-tip-alert">
+          <el-alert v-if="taskForm.taskMode === 'rush'" type="info" show-icon :closable="false" class="form-tip-alert">
             <template #title>
               <strong>时间同步提示</strong>
             </template>
@@ -1778,9 +1948,15 @@ onUnmounted(() => {
           <el-form-item label="订单类型">
             <el-input :model-value="String(taskForm.orderType)" disabled />
           </el-form-item>
+          <el-form-item v-if="isHybridTaskForm" required label="回流捡漏时长">
+            <el-radio-group v-model="taskForm.durationMode" @change="handleDurationModeChange">
+              <el-radio-button label="limited">有限模式</el-radio-button>
+              <el-radio-button label="unlimited">无限模式</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
           <el-row v-if="!isRestockUnlimitedTaskForm" :gutter="12">
             <el-col :xs="24" :sm="12">
-              <el-form-item :required="isRestockTaskForm" :label="isRestockTaskForm ? '截止时间' : '结束时间'">
+              <el-form-item :required="hasRestockTaskSection" :label="hasRestockTaskSection ? '截止时间' : '结束时间'">
                 <el-date-picker
                   v-model="taskForm.endAt"
                   type="datetime"
@@ -1791,14 +1967,15 @@ onUnmounted(() => {
                 />
               </el-form-item>
             </el-col>
-            <el-col v-if="!isRestockTaskForm" :xs="24" :sm="12">
+            <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item required label="起售时间">
                 <el-input :model-value="taskForm.saleStart" disabled />
               </el-form-item>
             </el-col>
           </el-row>
-          <p v-if="!isRestockTaskForm" class="field-hint">不填写则默认开票后 10 分钟停止。</p>
-          <p v-else-if="taskForm.durationMode === 'limited'" class="field-hint">有限模式达到截止时间后停止检测。</p>
+          <p v-if="!hasRestockTaskSection" class="field-hint">不填写则默认开票后 10 分钟停止。</p>
+          <p v-else-if="isRestockTaskForm && taskForm.durationMode === 'limited'" class="field-hint">有限模式达到截止时间后停止检测。</p>
+          <p v-else-if="taskForm.durationMode === 'limited'" class="field-hint">有限模式达到截止时间后停止回流检测。</p>
           <p v-else class="field-hint">无限模式不会按时间自动停止，请在任务管理中手动停止。</p>
           <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveTask" :loading="loading">
             保存任务

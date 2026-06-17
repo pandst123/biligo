@@ -521,6 +521,7 @@
     "taskMode": "rush",
     "durationMode": "limited",
     "selectedTickets": [],
+    "rushDurationSeconds": 600,
     "orderType": 1,
     "payMoney": 136000,
     "buyerInfo": [
@@ -599,6 +600,7 @@
   "taskMode": "rush",
   "durationMode": "limited",
   "selectedTickets": [],
+  "rushDurationSeconds": 600,
   "orderType": 1,
   "payMoney": 136000,
   "buyerInfo": [
@@ -637,10 +639,11 @@
 - `payMoney <= 0` 且 `ticketPrice > 0` 时，后端按票价乘购票人数补齐。
 - `pollIntervalMillis <= 0` 时后端默认修正为 `1000`，单位为毫秒。
 - `timeSyncStrategy` 可选值为 `bilibili` 或 `local`，为空时默认 `bilibili`。
-- `taskMode` 可选值为 `rush` 或 `restock`，为空时默认 `rush`。
+- `taskMode` 可选值为 `rush`、`restock` 或 `rush_restock`，为空时默认 `rush`。
 - `durationMode` 可选值为 `limited` 或 `unlimited`，为空时默认 `limited`。
-- `taskMode=restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
-- `taskMode=restock` 时 `selectedTickets` 至少需要 1 个票种；抢票模式仍使用单个 `screenId/skuId/linkId`。
+- `rushDurationSeconds <= 0` 时后端默认修正为 `600`；`taskMode=rush_restock` 时该值表示抢票阶段第一次订单请求发出后多少秒再切换回流捡漏。
+- `taskMode=restock` 或 `taskMode=rush_restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
+- `taskMode=restock` 或 `taskMode=rush_restock` 时 `selectedTickets` 至少需要 1 个票种；`rush` 和 `rush_restock` 的抢票段仍使用单个 `screenId/skuId/linkId`。
 - Web 控制台要求先获取票务信息、选择票信息、购票人和收货地址，再保存任务。
 
 任务模式：
@@ -649,6 +652,7 @@
 | --- | --- |
 | `rush` | 抢票模式。下发后按时间同步策略等待起售时间，起售后直接尝试订单流程。 |
 | `restock` | 回流捡漏模式。下发后不等待开票、不进行时间同步，每轮获取一次票务信息，并按最新接口返回顺序检测已选 `selectedTickets`；遇到第一个 `clickable=true` 后提交订单。 |
+| `rush_restock` | 抢票+回流捡漏模式。下发后先按抢票模式等待起售并直接尝试订单流程；抢票阶段第一次订单请求发出后 `rushDurationSeconds` 秒仍未进入支付或重复订单时，切换到回流捡漏流程。 |
 
 时间同步策略：
 
@@ -679,6 +683,7 @@
 
 - `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 2 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
 - `restock`：后端不会等待开票、不会进行时间同步和预热，而是立即进入 `running`，按 `pollIntervalMillis` 每轮获取一次票务信息；在最新接口返回顺序中找到第一个属于 `selectedTickets` 且 `clickable=true` 的票种后，先写入任务主票种字段，再复用订单准备、订单创建和支付参数接口。订单准备或创建失败后会回到票种检测；订单已创建但支付参数获取失败时继续重试支付参数。`durationMode=limited` 时超过 `endAt` 会停止检测，`durationMode=unlimited` 时持续检测直到用户停止、删除或下单成功。
+- `rush_restock`：后端会先按抢票模式同步时间、等待起售并预热连接；到达起售时间后直接尝试订单流程。抢票段截止时间为“抢票阶段第一次订单请求发出时间 + `rushDurationSeconds`”，使用同步后的时间 offset 判断。抢票段成功进入 `waiting_payment` 或检测到重复订单时任务结束；抢票窗口结束仍未成功时写入“抢票窗口结束，切换回流捡漏。”日志，并进入回流捡漏流程。切换后的回流段不再重新时间同步或等待开票，`durationMode/endAt` 只作用于回流段。
 
 运行中的接口错误会按 `pollIntervalMillis` 继续重试，成功后进入 `waiting_payment`。
 

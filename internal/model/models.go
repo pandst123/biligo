@@ -8,9 +8,12 @@ const (
 
 	TaskModeRush    = "rush"
 	TaskModeRestock = "restock"
+	TaskModeHybrid  = "rush_restock"
 
 	DurationModeLimited   = "limited"
 	DurationModeUnlimited = "unlimited"
+
+	DefaultRushDurationSeconds = 600
 )
 
 type Health struct {
@@ -209,6 +212,7 @@ type Task struct {
 	TaskMode              string         `json:"taskMode"`
 	DurationMode          string         `json:"durationMode"`
 	SelectedTickets       []TicketOption `json:"selectedTickets"`
+	RushDurationSeconds   int            `json:"rushDurationSeconds"`
 	OrderType             int            `json:"orderType"`
 	PayMoney              int64          `json:"payMoney"`
 	BuyerInfo             []TicketBuyer  `json:"buyerInfo"`
@@ -234,35 +238,36 @@ type Task struct {
 }
 
 type TaskInput struct {
-	Name               string         `json:"name"`
-	AccountID          int64          `json:"accountId"`
-	ProjectID          int64          `json:"projectId"`
-	ProjectName        string         `json:"projectName"`
-	ScreenID           int64          `json:"screenId"`
-	SKUID              int64          `json:"skuId"`
-	SessionName        string         `json:"sessionName"`
-	TicketLevel        string         `json:"ticketLevel"`
-	TicketDisplay      string         `json:"ticketDisplay"`
-	TicketPrice        int64          `json:"ticketPrice"`
-	SaleStart          string         `json:"saleStart"`
-	SaleStatus         string         `json:"saleStatus"`
-	LinkID             int64          `json:"linkId"`
-	IsHotProject       bool           `json:"isHotProject"`
-	TaskMode           string         `json:"taskMode"`
-	DurationMode       string         `json:"durationMode"`
-	SelectedTickets    []TicketOption `json:"selectedTickets"`
-	OrderType          int            `json:"orderType"`
-	PayMoney           int64          `json:"payMoney"`
-	BuyerInfo          []TicketBuyer  `json:"buyerInfo"`
-	Buyer              string         `json:"buyer"`
-	Tel                string         `json:"tel"`
-	DeliverInfo        *TicketAddress `json:"deliverInfo,omitempty"`
-	Phone              string         `json:"phone"`
-	TimeSyncStrategy   string         `json:"timeSyncStrategy"`
-	Quantity           int            `json:"quantity"`
-	StartAt            string         `json:"startAt"`
-	EndAt              string         `json:"endAt"`
-	PollIntervalMillis int            `json:"pollIntervalMillis"`
+	Name                string         `json:"name"`
+	AccountID           int64          `json:"accountId"`
+	ProjectID           int64          `json:"projectId"`
+	ProjectName         string         `json:"projectName"`
+	ScreenID            int64          `json:"screenId"`
+	SKUID               int64          `json:"skuId"`
+	SessionName         string         `json:"sessionName"`
+	TicketLevel         string         `json:"ticketLevel"`
+	TicketDisplay       string         `json:"ticketDisplay"`
+	TicketPrice         int64          `json:"ticketPrice"`
+	SaleStart           string         `json:"saleStart"`
+	SaleStatus          string         `json:"saleStatus"`
+	LinkID              int64          `json:"linkId"`
+	IsHotProject        bool           `json:"isHotProject"`
+	TaskMode            string         `json:"taskMode"`
+	DurationMode        string         `json:"durationMode"`
+	SelectedTickets     []TicketOption `json:"selectedTickets"`
+	RushDurationSeconds int            `json:"rushDurationSeconds"`
+	OrderType           int            `json:"orderType"`
+	PayMoney            int64          `json:"payMoney"`
+	BuyerInfo           []TicketBuyer  `json:"buyerInfo"`
+	Buyer               string         `json:"buyer"`
+	Tel                 string         `json:"tel"`
+	DeliverInfo         *TicketAddress `json:"deliverInfo,omitempty"`
+	Phone               string         `json:"phone"`
+	TimeSyncStrategy    string         `json:"timeSyncStrategy"`
+	Quantity            int            `json:"quantity"`
+	StartAt             string         `json:"startAt"`
+	EndAt               string         `json:"endAt"`
+	PollIntervalMillis  int            `json:"pollIntervalMillis"`
 }
 
 type TaskLog struct {
@@ -300,6 +305,8 @@ func NormalizeTaskMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case TaskModeRestock:
 		return TaskModeRestock
+	case TaskModeHybrid:
+		return TaskModeHybrid
 	default:
 		return TaskModeRush
 	}
