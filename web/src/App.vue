@@ -132,6 +132,7 @@ const taskForm = reactive<TaskInput>({
 })
 
 const selectedTaskId = ref<number | null>(null)
+const mobileLogMode = ref<'empty' | 'task' | 'all'>('empty')
 const ticketProjectInput = ref('')
 const fetchedTicketProject = ref<TicketProject | null>(null)
 const ticketOptions = ref<TicketOption[]>([])
@@ -1137,6 +1138,7 @@ async function deleteTask(id: number) {
     await api.deleteTask(id)
     if (selectedTaskId.value === id) {
       selectedTaskId.value = null
+      mobileLogMode.value = 'empty'
     }
     tasks.value = await api.listTasks()
     logs.value = await api.listLogs()
@@ -1150,7 +1152,21 @@ async function selectTaskLog(task: Task) {
   })
 }
 
+async function selectMobileTaskLog(task: Task) {
+  mobileLogMode.value = 'task'
+  await selectTaskLog(task)
+}
+
 async function showAllLogs() {
+  mobileLogMode.value = 'empty'
+  selectedTaskId.value = null
+  await run(async () => {
+    logs.value = await api.listLogs()
+  })
+}
+
+async function showAllMobileLogs() {
+  mobileLogMode.value = 'all'
   selectedTaskId.value = null
   await run(async () => {
     logs.value = await api.listLogs()
@@ -2126,24 +2142,46 @@ onUnmounted(() => {
           </el-table>
           <div class="mobile-task-list">
             <article v-for="task in tasks" :key="task.id" class="item-card">
-              <div>
+              <div class="mobile-task-main">
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ timeSyncSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>
-                <small>{{ task.lastMessage || '-' }}</small>
+                <small class="mobile-task-message">{{ task.lastMessage || '-' }}</small>
               </div>
               <div class="actions">
                 <el-tag :type="taskModeTagType(task)">{{ taskModeLabel(task) }}</el-tag>
                 <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
-                <el-button :icon="View" @click="selectTaskLog(task)">日志</el-button>
+                <el-button :icon="View" @click="selectMobileTaskLog(task)">日志</el-button>
                 <el-button type="primary" :icon="VideoPlay" @click="startTask(task.id)">启动</el-button>
                 <el-button :icon="SwitchButton" @click="stopTask(task.id)">停止</el-button>
                 <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
               </div>
             </article>
             <el-empty v-if="tasks.length === 0" description="暂无任务" />
+            <section class="mobile-log-panel">
+              <div class="mobile-log-toolbar">
+                <div class="log-heading-title">
+                  <h3>{{ mobileLogMode === 'all' ? '全部日志' : mobileLogMode === 'task' ? '运行日志' : '日志显示区' }}</h3>
+                  <small v-if="mobileLogMode === 'task' && selectedTaskTicketSubtitle" class="muted log-subtitle">
+                    {{ selectedTaskTicketSubtitle }}
+                  </small>
+                </div>
+                <el-button text :icon="Document" @click="showAllMobileLogs">全部日志</el-button>
+              </div>
+              <template v-if="mobileLogMode !== 'empty'">
+                <article v-for="log in logs" :key="log.id" class="mobile-log-line">
+                  <div class="mobile-log-meta">
+                    <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
+                    <time>{{ log.createdAt }}</time>
+                  </div>
+                  <p>{{ log.message }}</p>
+                </article>
+                <el-empty v-if="logs.length === 0" description="暂无日志" />
+              </template>
+              <el-empty v-else description="请选择任务查看日志，或查看全部日志" />
+            </section>
           </div>
         </section>
 

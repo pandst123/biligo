@@ -594,6 +594,67 @@ p {
   display: none;
 }
 
+.mobile-task-main {
+  min-width: 0;
+}
+
+.mobile-task-message {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mobile-log-panel {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e1d5c7;
+  border-radius: 8px;
+  background: #fff8ee;
+}
+
+.mobile-log-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mobile-log-line {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid #eadfce;
+}
+
+.mobile-log-line:last-of-type {
+  border-bottom: 0;
+}
+
+.mobile-log-line p {
+  overflow-wrap: anywhere;
+}
+
+.mobile-log-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mobile-log-meta time {
+  color: #77736c;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .log-panel {
   max-height: 420px;
   overflow: auto;
@@ -693,6 +754,34 @@ p {
   .mobile-task-list {
     display: grid;
     gap: 12px;
+  }
+
+  .status-layout > .log-panel {
+    display: none;
+  }
+
+  .mobile-task-list .item-card {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .mobile-task-list .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    min-width: 0;
+    justify-content: stretch;
+  }
+
+  .mobile-task-list .actions .el-tag,
+  .mobile-task-list .actions .el-button {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .mobile-task-list .actions .el-tag {
+    justify-content: center;
   }
 }
 
