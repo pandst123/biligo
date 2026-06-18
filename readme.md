@@ -20,7 +20,10 @@ Biligo 是一个 哔哩哔哩会员购 抢票辅助工具
 2. 禁止使用本软件从事违法行为，包括但不限于批量抢票、黄牛倒票等行为
 3. 使用者应自行确认使用行为**符合平台服务条款**。因使用本项目产生的账号限制、订单失败或其他后果，由使用者自行承担。
 
-## 使用方法
+## 本地部署
+
+<details>
+<summary>展开查看本地部署说明</summary>
 
 以下说明面向已经下载或自行编译好的二进制文件。
 
@@ -107,6 +110,111 @@ http://127.0.0.1:8080/api/health
 ### 5. 停止程序
 
 在终端中按 `Ctrl+C` 停止服务。下次启动时，如果发现上次未结束的运行任务，程序会自动将其停止，避免误恢复运行。
+
+</details>
+
+## Docker 部署
+
+<details>
+<summary>展开查看 Docker 部署说明</summary>
+
+本仓库发布的 Docker 镜像默认已嵌入前端页面，容器启动后只需要暴露一个端口，同时提供 Web 控制台和 `/api`。
+
+### 1. 拉取镜像
+
+```bash
+docker pull ghcr.io/fdcs99/biligo:latest
+```
+
+### 2. 准备运行目录
+
+建议把配置、数据库和日志挂载到宿主机，方便升级镜像后继续使用：
+
+```bash
+mkdir -p data logs
+cp config.example.yaml config.yaml
+```
+
+如果没有提前准备 `config.yaml`，程序也会在容器内自动生成 `/app/config.yaml`，并在启动日志中输出面板登录密码。
+
+### 3. 启动容器
+
+已准备 `config.yaml` 时：
+
+```bash
+docker run -d \
+  --name biligo \
+  -p 8080:8080 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/logs:/app/logs" \
+  ghcr.io/fdcs99/biligo:latest
+```
+
+如果还没有准备 `config.yaml`，可以先不挂载配置文件：
+
+```bash
+docker run -d \
+  --name biligo \
+  -p 8080:8080 \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/logs:/app/logs" \
+  ghcr.io/fdcs99/biligo:latest
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8080/
+```
+
+查看启动日志和自动生成的面板密码：
+
+```bash
+docker logs -f biligo
+```
+
+### 4. 使用环境变量调整参数
+
+```bash
+docker run -d \
+  --name biligo \
+  -p 18080:18080 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/logs:/app/logs" \
+  -e BILIGO_ADDR=":18080" \
+  -e BILIGO_PANEL_PASSWORD="your-panel-password" \
+  ghcr.io/fdcs99/biligo:latest
+```
+
+常用环境变量：
+
+- `BILIGO_ADDR`：监听地址，例如 `:8080`。
+- `BILIGO_PANEL_PASSWORD`：面板登录密码。
+- `BILIGO_DB`：数据库路径，例如 `/app/data/biligo.db`。
+- `BILIGO_LOG_LEVELS`：日志等级，例如 `info,warn,error`，设置为 `none` 可关闭输出。
+- `BILIGO_LOG_COLOR`：控制台颜色，支持 `auto`、`always`、`never`。
+
+### 5. 停止和升级
+
+停止并删除当前容器：
+
+```bash
+docker stop biligo
+docker rm biligo
+```
+
+升级到最新镜像后，使用同样的 `docker run` 命令重新启动即可：
+
+```bash
+docker pull ghcr.io/fdcs99/biligo:latest
+docker stop biligo
+docker rm biligo
+# 重新执行上面的 docker run 命令
+```
+
+</details>
 
 ## 平台尊重原则
 本项目开发者尊重 **哔哩哔哩** 及其会员购票务系统的运营规则、商业权益和公平购票秩序。

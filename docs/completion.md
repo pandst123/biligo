@@ -9,6 +9,29 @@
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 - 聊天中提到: “记录演进”，在将演进记录添加到本文件中，否则不添加
 
+## 2026-06-18 Dockerfile 与镜像部署支持
+
+类型：部署能力
+
+摘要：新增 Dockerfile 和容器部署说明，并在 Release 发布时自动构建和推送本仓库 Docker 镜像。
+
+主要变更：
+
+- 新增项目根目录 `Dockerfile`，使用 Node/pnpm 构建前端，并以 `embed_web` 标签编译 Go 服务，最终生成 Alpine 运行镜像。
+- 新增 `.dockerignore`，排除本地数据、日志、依赖目录和构建产物，减少镜像构建上下文。
+- 更新 `docs/dev.md`，补充 Docker 本地构建、运行和镜像发布说明。
+- 更新 `readme.md`，将本地部署和 Docker 部署说明改为可折叠区域，并将 Docker 部署聚焦为拉取 `ghcr.io/fdcs99/biligo:latest` 后运行。
+- 更新 `.github/workflows/build.yml`，在 Release 发布时构建并推送 `ghcr.io/fdcs99/biligo` 的 `latest` 和版本标签镜像，支持 `linux/amd64`、`linux/arm64`。
+
+验收情况：
+
+- 已通过 `git diff --check`。
+- 已通过等价非 Docker 构建链路：`pnpm --dir web install --frozen-lockfile`、`pnpm --dir web build`、复制前端产物到 `internal/webui/dist` 后执行 `CGO_ENABLED=0 go build -tags embed_web ./cmd/server`。
+
+遗留事项：
+
+- Docker Desktop daemon 恢复后，需要执行 `docker build -t biligo:local .` 验证镜像构建。
+
 ## 2026-06-18 API 代理组节点约束
 
 类型：行为修正

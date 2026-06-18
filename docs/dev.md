@@ -87,3 +87,83 @@ server:
 ```
 
 运行后访问 `http://127.0.0.1:8080/`，API 仍位于同端口的 `/api` 下。
+
+## Docker 镜像
+
+项目根目录提供 `Dockerfile`，镜像构建时会自动完成以下步骤：
+
+1. 使用 pnpm 构建 Vue 前端。
+2. 将 `web/dist` 复制到 `internal/webui/dist`。
+3. 使用 `embed_web` 标签编译 Go 服务。
+4. 生成只包含 `biligo` 二进制、证书和运行目录的 Alpine 运行镜像。
+
+本地构建镜像：
+
+```bash
+docker build -t biligo:local .
+```
+
+本地运行：
+
+```bash
+docker run --rm -it \
+  -p 8080:8080 \
+  -v "$PWD/docker-data:/app/data" \
+  -v "$PWD/docker-logs:/app/logs" \
+  -e BILIGO_ADDR=":8080" \
+  biligo:local
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8080/
+```
+
+如果不挂载 `config.yaml`，程序会在容器内生成 `/app/config.yaml`，并在控制台输出面板密码。生产使用建议挂载配置文件：
+
+```bash
+docker run -d \
+  --name biligo \
+  -p 8080:8080 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/logs:/app/logs" \
+  biligo:local
+```
+
+发布到 GitHub Container Registry 示例：
+
+```bash
+export IMAGE=ghcr.io/<github-用户名或组织>/biligo
+export VERSION=v0.1.0
+
+docker login ghcr.io
+docker build -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+docker push "$IMAGE:$VERSION"
+docker push "$IMAGE:latest"
+```
+
+发布到 Docker Hub 示例：
+
+```bash
+export IMAGE=<dockerhub-用户名>/biligo
+export VERSION=v0.1.0
+
+docker login
+docker build -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+docker push "$IMAGE:$VERSION"
+docker push "$IMAGE:latest"
+```
+
+多架构发布示例：
+
+```bash
+docker buildx create --use --name biligo-builder
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t "$IMAGE:$VERSION" \
+  -t "$IMAGE:latest" \
+  --push \
+  .
+```
