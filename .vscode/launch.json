@@ -9,25 +9,39 @@
       "program": "${workspaceFolder}/cmd/server",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "dlvToolPath": "${env:HOME}/go/bin/dlv",
       "env": {
         "BILIGO_CONFIG": "${workspaceFolder}/config.yaml"
       },
       "args": []
     },
     {
+      "name": "Vite Dev Server",
+      "type": "pwa-node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "cwd": "${workspaceFolder}/web",
+      "console": "integratedTerminal",
+      "outputCapture": "std",
+      "serverReadyAction": {
+        "pattern": "Local:\\s+(https?://\\S+)",
+        "uriFormat": "%s",
+        "action": "debugWithChrome",
+        "webRoot": "${workspaceFolder}/web/src"
+      }
+    },
+    {
       "name": "Web Frontend",
       "type": "pwa-chrome",
       "request": "launch",
       "url": "http://localhost:5173",
-      "webRoot": "${workspaceFolder}/web/src",
-      "preLaunchTask": "web: dev"
+      "webRoot": "${workspaceFolder}/web/src"
     }
   ],
   "compounds": [
     {
       "name": "Biligo Full Stack",
-      "configurations": ["Go API Server", "Web Frontend"],
+      "configurations": ["Go API Server", "Vite Dev Server"],
       "stopAll": true
     }
   ]
