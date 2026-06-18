@@ -31,6 +31,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 const (
@@ -124,7 +125,11 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 	}
 	m.publishTaskAndLog(task, log)
 
-	go m.run(runCtx, taskID, cookie)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.run(runCtx, taskID, cookie)
+	}()
 	return task, nil
 }
 
@@ -156,6 +161,45 @@ func (m *Manager) Cancel(taskID int64) {
 		delete(m.running, taskID)
 	}
 	m.mu.Unlock()
+}
+
+func (m *Manager) StopAll(ctx context.Context) error {
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.running))
+	for taskID, cancel := range m.running {
+		if cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+		delete(m.running, taskID)
+	}
+	m.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	tasks, logs, err := m.store.PauseActiveTasks(ctx, "服务停止，任务已自动停止。")
+	if err != nil {
+		return err
+	}
+	for index := range tasks {
+		m.publishTask(tasks[index])
+		if index < len(logs) {
+			m.publishLog(logs[index])
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
@@ -816,8 +860,18 @@ func (m *Manager) publishTaskAndLog(task model.Task, log model.TaskLog) {
 	if m.hub == nil {
 		return
 	}
-	m.hub.Publish("task.updated", task)
-	if log.ID > 0 {
+	m.publishTask(task)
+	m.publishLog(log)
+}
+
+func (m *Manager) publishTask(task model.Task) {
+	if m.hub != nil {
+		m.hub.Publish("task.updated", task)
+	}
+}
+
+func (m *Manager) publishLog(log model.TaskLog) {
+	if m.hub != nil && log.ID > 0 {
 		m.hub.Publish("log.created", log)
 	}
 }

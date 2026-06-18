@@ -74,7 +74,7 @@ cp -R web/dist/. internal/webui/dist/
 GOOS=windows GOARCH=amd64 go build \
   -tags embed_web \
   -trimpath \
-  -ldflags="-s -w" \
+  -ldflags="-s -w -H=windowsgui" \
   -o release/biligo.exe \
   ./cmd/server
 ```
@@ -87,6 +87,8 @@ server:
 ```
 
 运行后访问 `http://127.0.0.1:8080/`，API 仍位于同端口的 `/api` 下。
+
+Windows 版本默认以系统托盘方式运行，不显示控制台窗口。托盘菜单支持启动、停止、重启服务，打开 Web 控制台，显示或隐藏控制台，以及打开配置目录和日志目录。
 
 ## Docker 镜像
 

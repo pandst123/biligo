@@ -889,6 +889,15 @@ func (s *Store) DeleteTask(ctx context.Context, id int64) error {
 }
 
 func (s *Store) PauseInterruptedTasks(ctx context.Context) ([]model.Task, error) {
+	tasks, _, err := s.PauseActiveTasks(ctx, interruptedTaskMessage)
+	return tasks, err
+}
+
+func (s *Store) PauseActiveTasks(ctx context.Context, message string) ([]model.Task, []model.TaskLog, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "任务已停止。"
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id
 		FROM tasks
@@ -896,7 +905,7 @@ func (s *Store) PauseInterruptedTasks(ctx context.Context) ([]model.Task, error)
 		ORDER BY id ASC
 	`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
@@ -904,26 +913,28 @@ func (s *Store) PauseInterruptedTasks(ctx context.Context) ([]model.Task, error)
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tasks := make([]model.Task, 0, len(ids))
+	logs := make([]model.TaskLog, 0, len(ids))
 	for _, id := range ids {
-		task, _, err := s.SetTaskRuntime(ctx, id, model.TaskRuntimeUpdate{
+		task, log, err := s.SetTaskRuntime(ctx, id, model.TaskRuntimeUpdate{
 			Status:      "paused",
-			LastMessage: interruptedTaskMessage,
+			LastMessage: message,
 		}, "warn")
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tasks = append(tasks, task)
+		logs = append(logs, log)
 	}
-	return tasks, nil
+	return tasks, logs, nil
 }
 
 func (s *Store) SetTaskStatus(ctx context.Context, id int64, status string, message string, level string) (model.Task, error) {

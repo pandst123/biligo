@@ -57,7 +57,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
           cache: true
 
       - name: Setup pnpm
@@ -128,10 +128,14 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p build/bin
+          ldflags="-s -w"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ldflags="$ldflags -H=windowsgui"
+          fi
           go build \
             -tags embed_web \
             -trimpath \
-            -ldflags="-s -w" \
+            -ldflags="$ldflags" \
             -o "build/bin/biligo${{ matrix.binary_ext }}" \
             ./cmd/server
 

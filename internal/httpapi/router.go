@@ -44,6 +44,11 @@ type RouterOptions struct {
 	NotificationSender notify.Sender
 }
 
+type Runtime struct {
+	Router *gin.Engine
+	Runner *runner.Manager
+}
+
 type RouterOption func(*RouterOptions)
 
 func WithWebFS(webFS fs.FS) RouterOption {
@@ -59,6 +64,10 @@ func WithNotificationSender(sender notify.Sender) RouterOption {
 }
 
 func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logger, opts ...RouterOption) *gin.Engine {
+	return NewRuntime(store, panel, logger, opts...).Router
+}
+
+func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Logger, opts ...RouterOption) Runtime {
 	gin.SetMode(gin.ReleaseMode)
 	var options RouterOptions
 	for _, opt := range opts {
@@ -153,7 +162,10 @@ func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logg
 		registerWebUI(router, options.WebFS)
 	}
 
-	return router
+	return Runtime{
+		Router: router,
+		Runner: runnerManager,
+	}
 }
 
 func registerWebUI(router *gin.Engine, webFS fs.FS) {

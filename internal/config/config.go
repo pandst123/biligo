@@ -125,6 +125,27 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func ReadPanelPassword(path string) (string, error) {
+	if path == "" {
+		path = os.Getenv("BILIGO_CONFIG")
+	}
+	if path == "" {
+		path = "config.yaml"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return "", err
+	}
+	if envPanelPassword := strings.TrimSpace(os.Getenv("BILIGO_PANEL_PASSWORD")); envPanelPassword != "" {
+		return envPanelPassword, nil
+	}
+	return strings.TrimSpace(cfg.Auth.Password), nil
+}
+
 func (levels *LogLevels) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
 	case yaml.ScalarNode:

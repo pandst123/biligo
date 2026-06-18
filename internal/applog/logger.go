@@ -21,11 +21,12 @@ const (
 )
 
 type Logger struct {
-	mu       sync.Mutex
-	console  io.Writer
-	file     io.Writer
-	enabled  map[string]bool
-	useColor bool
+	mu        sync.Mutex
+	console   io.Writer
+	file      io.Writer
+	enabled   map[string]bool
+	useColor  bool
+	colorMode string
 }
 
 func New(levels []string, colorMode ...string) *Logger {
@@ -48,6 +49,10 @@ func NewWithFile(levels []string, colorMode string, file io.Writer) *Logger {
 	return newWithWriters(levels, os.Stdout, file, colorMode)
 }
 
+func NewWithOutputs(levels []string, console io.Writer, colorMode string, file io.Writer) *Logger {
+	return newWithWriters(levels, console, file, colorMode)
+}
+
 func newWithWriters(levels []string, console io.Writer, file io.Writer, colorMode string) *Logger {
 	if console == nil {
 		console = io.Discard
@@ -56,7 +61,7 @@ func newWithWriters(levels []string, console io.Writer, file io.Writer, colorMod
 	for _, level := range levels {
 		level = normalizeLevel(level)
 		if level == "none" {
-			return &Logger{console: console, file: file, enabled: map[string]bool{}}
+			return &Logger{console: console, file: file, enabled: map[string]bool{}, colorMode: colorMode}
 		}
 		if level == "all" {
 			enabled[LevelError] = true
@@ -68,7 +73,20 @@ func newWithWriters(levels []string, console io.Writer, file io.Writer, colorMod
 			enabled[level] = true
 		}
 	}
-	return &Logger{console: console, file: file, enabled: enabled, useColor: shouldUseColor(console, colorMode)}
+	return &Logger{console: console, file: file, enabled: enabled, useColor: shouldUseColor(console, colorMode), colorMode: colorMode}
+}
+
+func (l *Logger) SetConsoleWriter(console io.Writer) {
+	if l == nil {
+		return
+	}
+	if console == nil {
+		console = io.Discard
+	}
+	l.mu.Lock()
+	l.console = console
+	l.useColor = shouldUseColor(console, l.colorMode)
+	l.mu.Unlock()
 }
 
 func (l *Logger) Errorf(format string, args ...any) {

@@ -9,6 +9,33 @@
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 - 聊天中提到: “记录演进”，在将演进记录添加到本文件中，否则不添加
 
+## 2026-06-18 Windows 托盘支持
+
+类型：功能新增
+
+摘要：Windows 版本新增系统托盘入口，支持后台启动服务、服务启停、打开控制台与 Web 页面，并补齐 Windows ARM64 构建。
+
+主要变更：
+
+- 引入 `github.com/gogpu/systray`，全项目 Go 工具链升级到 1.25。
+- Windows release 默认使用托盘模式和 `windowsgui` 子系统启动，不显示控制台窗口。
+- 托盘菜单支持启动、停止、重启服务，打开 Web 控制台，显示/隐藏控制台，打开配置目录和日志目录，复制面板密码。
+- 服务入口拆分为可控生命周期，支持启动、停止、重启；停止服务时会停止运行中任务并释放 HTTP、数据库和日志资源。
+- 控制台显示时设置 UTF-8 代码页，修复中文乱码；打开网页和目录改用 Windows `ShellExecuteW`。
+- Release 构建补充 Windows ARM64 产物，CI、Dockerfile 和开发文档同步升级 Go 1.25。
+
+验收情况：
+
+- 已通过 `go test ./...`。
+- 已通过 `pnpm --dir web build`。
+- 已通过 `go test -tags embed_web ./...`。
+- 已通过 Windows amd64/arm64 交叉构建：`CGO_ENABLED=0 GOOS=windows GOARCH=amd64/arm64 go build -tags embed_web -trimpath -ldflags="-s -w -H=windowsgui" ./cmd/server`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 当前环境无法实际点击 Windows 托盘，仍需在 Windows 桌面环境手动验收托盘菜单交互。
+
 ## 2026-06-18 Dockerfile 与镜像部署支持
 
 类型：部署能力
