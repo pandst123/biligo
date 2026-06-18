@@ -125,6 +125,156 @@ func TestDefaultBBRIsRetryableCreateWarning(t *testing.T) {
 	}
 }
 
+func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
+	var prepareBody map[string]any
+	var createBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			if r.Method != http.MethodPost {
+				t.Fatalf("prepare method = %s, want POST", r.Method)
+			}
+			if r.URL.Query().Get("project_id") != "1001701" {
+				t.Fatalf("prepare project_id = %q, want 1001701", r.URL.Query().Get("project_id"))
+			}
+			if err := json.NewDecoder(r.Body).Decode(&prepareBody); err != nil {
+				t.Fatalf("decode prepare body: %v", err)
+			}
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"token":  "prepared-token",
+					"ptoken": "prepared=ptoken=",
+				},
+			})
+		case "/api/ticket/order/createV2":
+			if r.Method != http.MethodPost {
+				t.Fatalf("create method = %s, want POST", r.Method)
+			}
+			if r.URL.Query().Get("ptoken") != "preparedptoken" {
+				t.Fatalf("create query ptoken = %q, want preparedptoken", r.URL.Query().Get("ptoken"))
+			}
+			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
+				t.Fatalf("decode create body: %v", err)
+			}
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "order-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	task := model.Task{
+		ProjectID:    1001701,
+		ScreenID:     2001,
+		SKUID:        3001,
+		Quantity:     1,
+		OrderType:    1,
+		PayMoney:     68000,
+		IsHotProject: true,
+	}
+	prepared, err := client.PrepareOrder(context.Background(), task, "SESSDATA=test")
+	if err != nil {
+		t.Fatalf("PrepareOrder: %v", err)
+	}
+	if prepared.Token != "prepared-token" || prepared.PToken != "preparedptoken" {
+		t.Fatalf("unexpected prepared result: %#v", prepared)
+	}
+	if stringValue(prepareBody["requestSource"]) != "neul-next" || !boolValue(prepareBody["ignoreRequestLimit"]) {
+		t.Fatalf("prepare risk fields missing: %#v", prepareBody)
+	}
+	if stringValue(prepareBody["ticket_agent"]) != "" {
+		t.Fatalf("prepare ticket_agent = %q, want empty", stringValue(prepareBody["ticket_agent"]))
+	}
+	prepareCToken := stringValue(prepareBody["token"])
+	if prepareCToken == "" {
+		t.Fatalf("prepare token is empty for hot project: %#v", prepareBody)
+	}
+	prepareBytes := decodeCTokenForTest(t, prepareCToken)
+	if prepareBytes[1] != 0 || prepareBytes[3] != 0 || prepareBytes[6] < 1 || prepareBytes[6] > 3 {
+		t.Fatalf("unexpected prepare ctoken bytes: %#v", prepareBytes)
+	}
+	prepareTimer := int(prepareBytes[8])<<8 | int(prepareBytes[9])
+	if prepareTimer < 10 || prepareTimer > 100 || prepareBytes[10] != 0 || prepareBytes[11] != 0 {
+		t.Fatalf("unexpected prepare timer fields: %#v", prepareBytes[8:12])
+	}
+
+	result, err := client.CreateOrder(context.Background(), task, "SESSDATA=test", prepared)
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if result.OrderID != "order-1" {
+		t.Fatalf("OrderID = %q, want order-1", result.OrderID)
+	}
+	createCToken := stringValue(createBody["ctoken"])
+	if createCToken == "" {
+		t.Fatalf("create ctoken is empty for hot project: %#v", createBody)
+	}
+	createBytes := decodeCTokenForTest(t, createCToken)
+	if createBytes[1] > 2 || createBytes[3] > 1 || createBytes[6] < 10 || createBytes[6] > 50 {
+		t.Fatalf("unexpected create ctoken bytes: %#v", createBytes)
+	}
+	if stringValue(createBody["ptoken"]) != "preparedptoken" {
+		t.Fatalf("create body ptoken = %q, want preparedptoken", stringValue(createBody["ptoken"]))
+	}
+	if stringValue(createBody["orderCreateUrl"]) != server.URL+"/api/ticket/order/createV2" {
+		t.Fatalf("orderCreateUrl = %q", stringValue(createBody["orderCreateUrl"]))
+	}
+	if stringValue(createBody["requestSource"]) != "neul-next" || !boolValue(createBody["newRisk"]) {
+		t.Fatalf("create risk fields missing: %#v", createBody)
+	}
+	clickPosition, ok := mapValue(createBody["clickPosition"])
+	if !ok {
+		t.Fatalf("clickPosition missing: %#v", createBody)
+	}
+	if x, y := int64Value(clickPosition["x"]), int64Value(clickPosition["y"]); x < 400 || x > 900 || y < 400 || y > 900 {
+		t.Fatalf("clickPosition coordinates out of range: %#v", clickPosition)
+	}
+	if int64Value(clickPosition["origin"]) <= 0 || int64Value(clickPosition["now"]) <= 0 {
+		t.Fatalf("clickPosition timestamps missing: %#v", clickPosition)
+	}
+}
+
+func TestHotProjectCreateOrderKeepsEmptyPTokenFields(t *testing.T) {
+	var createBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/ticket/order/createV2" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		if !strings.Contains(r.URL.RawQuery, "ptoken=") {
+			t.Fatalf("create query = %q, want explicit empty ptoken", r.URL.RawQuery)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
+			t.Fatalf("decode create body: %v", err)
+		}
+		writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "order-1"}})
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	task := model.Task{
+		ProjectID:    1001701,
+		ScreenID:     2001,
+		SKUID:        3001,
+		Quantity:     1,
+		OrderType:    1,
+		PayMoney:     68000,
+		IsHotProject: true,
+	}
+	if _, err := client.CreateOrder(context.Background(), task, "SESSDATA=test", OrderPrepareResult{Token: "prepared-token"}); err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if value, ok := createBody["ptoken"]; !ok || stringValue(value) != "" {
+		t.Fatalf("create body ptoken = %#v, want explicit empty string", createBody["ptoken"])
+	}
+	if stringValue(createBody["orderCreateUrl"]) != server.URL+"/api/ticket/order/createV2" {
+		t.Fatalf("orderCreateUrl = %q", stringValue(createBody["orderCreateUrl"]))
+	}
+}
+
 func TestWarmupShowSendsHeadRequests(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +346,7 @@ func TestFetchPurchaseContextMapsProjectBuyersAndAddresses(t *testing.T) {
 				"data": map[string]any{
 					"projectId":   1001701,
 					"projectName": "测试项目",
-					"hotProject":  false,
+					"hotProject":  true,
 					"screenList": []map[string]any{
 						{
 							"id":          2001,
@@ -262,6 +412,9 @@ func TestFetchPurchaseContextMapsProjectBuyersAndAddresses(t *testing.T) {
 	}
 	if len(project.TicketOptions) != 1 || project.TicketOptions[0].SKUID != 3001 {
 		t.Fatalf("unexpected ticket options: %#v", project.TicketOptions)
+	}
+	if !project.IsHotProject || !project.TicketOptions[0].IsHotProject {
+		t.Fatalf("hot project flag was not propagated: project=%v ticket=%v", project.IsHotProject, project.TicketOptions[0].IsHotProject)
 	}
 	if !project.TicketOptions[0].Clickable {
 		t.Fatalf("ticket clickable = false, want true")

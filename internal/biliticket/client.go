@@ -48,16 +48,19 @@ var saleFlagNumberMap = map[int64]string{
 }
 
 type Client struct {
-	httpClient  *http.Client
-	showBaseURL string
-	mallBaseURL string
-	apiBaseURL  string
+	httpClient   *http.Client
+	showBaseURL  string
+	mallBaseURL  string
+	apiBaseURL   string
+	createTimeMs int64
+	cTokenWindow cTokenBrowserWindowState
 }
 
 type OrderPrepareResult struct {
-	Token  string
-	PToken string
-	Raw    map[string]any
+	Token         string
+	PToken        string
+	Raw           map[string]any
+	cTokenSession cTokenSession
 }
 
 type OrderCreateResult struct {
@@ -92,10 +95,12 @@ func NewClient(httpClient *http.Client) *Client {
 		httpClient = newKeepAliveHTTPClient()
 	}
 	return &Client{
-		httpClient:  httpClient,
-		showBaseURL: defaultShowBaseURL,
-		mallBaseURL: defaultMallBaseURL,
-		apiBaseURL:  defaultAPIBaseURL,
+		httpClient:   httpClient,
+		showBaseURL:  defaultShowBaseURL,
+		mallBaseURL:  defaultMallBaseURL,
+		apiBaseURL:   defaultAPIBaseURL,
+		createTimeMs: time.Now().UnixMilli(),
+		cTokenWindow: generateCTokenBrowserWindowState(),
 	}
 }
 
@@ -130,10 +135,12 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		return NewClient(httpClient)
 	}
 	return &Client{
-		httpClient:  httpClient,
-		showBaseURL: c.showBaseURL,
-		mallBaseURL: c.mallBaseURL,
-		apiBaseURL:  c.apiBaseURL,
+		httpClient:   httpClient,
+		showBaseURL:  c.showBaseURL,
+		mallBaseURL:  c.mallBaseURL,
+		apiBaseURL:   c.apiBaseURL,
+		createTimeMs: c.createTimeMs,
+		cTokenWindow: c.cTokenWindow,
 	}
 }
 
@@ -313,13 +320,23 @@ func (c *Client) WarmupShow(ctx context.Context, count int) error {
 
 func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie string) (OrderPrepareResult, error) {
 	payload := map[string]any{
-		"count":      task.Quantity,
-		"screen_id":  task.ScreenID,
-		"order_type": firstPositiveInt(int64(task.OrderType), 1),
-		"project_id": task.ProjectID,
-		"sku_id":     task.SKUID,
-		"token":      "",
-		"newRisk":    true,
+		"count":              task.Quantity,
+		"screen_id":          task.ScreenID,
+		"order_type":         firstPositiveInt(int64(task.OrderType), 1),
+		"project_id":         task.ProjectID,
+		"sku_id":             task.SKUID,
+		"buyer_info":         orderBuyers(task.BuyerInfo),
+		"ignoreRequestLimit": true,
+		"ticket_agent":       "",
+		"token":              "",
+		"newRisk":            true,
+		"requestSource":      "neul-next",
+	}
+	var cTokenSession cTokenSession
+	if task.IsHotProject {
+		ticketCollectionMs := time.Now().UnixMilli()
+		cTokenSession = newCTokenSession(task.ProjectID, ticketUserAgent, ticketCollectionMs, c.cTokenWindow)
+		payload["token"] = cTokenSession.generatePrepareAt(ticketCollectionMs)
 	}
 	var response map[string]any
 	endpoint := fmt.Sprintf("%s/api/ticket/order/prepare?project_id=%d", c.showBaseURL, task.ProjectID)
@@ -339,20 +356,30 @@ func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie strin
 		return OrderPrepareResult{Raw: response}, errors.New("订单准备响应缺少 token")
 	}
 	return OrderPrepareResult{
-		Token:  token,
-		PToken: stringValue(data["ptoken"]),
-		Raw:    response,
+		Token:         token,
+		PToken:        normalizePreparePToken(stringValue(data["ptoken"])),
+		Raw:           response,
+		cTokenSession: cTokenSession,
 	}, nil
 }
 
 func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string, prepared OrderPrepareResult) (OrderCreateResult, error) {
-	payload, err := buildOrderPayload(task, prepared.Token)
+	nowMs := time.Now().UnixMilli()
+	payload, err := buildOrderPayload(task, prepared.Token, nowMs)
 	if err != nil {
 		return OrderCreateResult{}, err
 	}
 	orderCreateURL := c.showBaseURL + "/api/ticket/order/createV2"
 	endpoint := fmt.Sprintf("%s?project_id=%d", orderCreateURL, task.ProjectID)
-	if prepared.PToken != "" {
+	if task.IsHotProject {
+		cTokenSession := prepared.cTokenSession
+		if cTokenSession.isZero() {
+			cTokenSession = newCTokenSession(task.ProjectID, ticketUserAgent, nowMs, c.cTokenWindow)
+		}
+		payload["clickPosition"] = c.clickPosition(nowMs)
+		payload["ctoken"] = cTokenSession.generateCreateAt(nowMs)
+	}
+	if task.IsHotProject || prepared.PToken != "" {
 		payload["ptoken"] = prepared.PToken
 		payload["orderCreateUrl"] = orderCreateURL
 		endpoint += "&ptoken=" + url.QueryEscape(prepared.PToken)
@@ -376,6 +403,19 @@ func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string
 		return result, createV2Error(response)
 	}
 	return result, nil
+}
+
+func (c *Client) clickPosition(nowMs int64) map[string]any {
+	originMs := c.createTimeMs
+	if originMs <= 0 {
+		originMs = nowMs
+	}
+	return map[string]any{
+		"x":      randIntInclusive(400, 900),
+		"y":      randIntInclusive(400, 900),
+		"origin": originMs,
+		"now":    nowMs,
+	}
 }
 
 func (c *Client) GetPayParam(ctx context.Context, orderID string, cookie string) (PayParamResult, error) {
@@ -713,7 +753,7 @@ func normalizeNewProjectPayload(data map[string]any, fallbackProjectID int64) (p
 	return projectPayload{
 		ID:         projectID,
 		Name:       stringValue(data["projectName"]),
-		HotProject: boolValue(data["hotProject"]),
+		HotProject: hotProjectValue(data),
 		HasETicket: !hasDeliveryFee,
 		ScreenList: rawScreens,
 		SalesDates: extractSalesDates(data["salesDates"]),
@@ -737,7 +777,7 @@ func normalizeOldProjectPayload(data map[string]any, fallbackProjectID int64) (p
 	return projectPayload{
 		ID:         projectID,
 		Name:       stringValue(data["name"]),
-		HotProject: boolValue(data["hotProject"]),
+		HotProject: hotProjectValue(data),
 		HasETicket: boolValue(data["has_eticket"]),
 		ScreenList: rawScreens,
 		SalesDates: extractSalesDates(data["sales_dates"]),
@@ -863,7 +903,7 @@ func normalizeAddress(raw map[string]any) model.TicketAddress {
 	return address
 }
 
-func buildOrderPayload(task model.Task, token string) (map[string]any, error) {
+func buildOrderPayload(task model.Task, token string, nowMs int64) (map[string]any, error) {
 	buyerInfo, err := json.Marshal(orderBuyers(task.BuyerInfo))
 	if err != nil {
 		return nil, err
@@ -873,20 +913,22 @@ func buildOrderPayload(task model.Task, token string) (map[string]any, error) {
 		return nil, err
 	}
 	payload := map[string]any{
-		"again":        1,
-		"count":        task.Quantity,
-		"screen_id":    task.ScreenID,
-		"project_id":   task.ProjectID,
-		"sku_id":       task.SKUID,
-		"order_type":   firstPositiveInt(int64(task.OrderType), 1),
-		"pay_money":    task.PayMoney,
-		"buyer_info":   string(buyerInfo),
-		"buyer":        task.Buyer,
-		"tel":          task.Tel,
-		"deliver_info": string(deliverInfo),
-		"phone":        task.Phone,
-		"token":        token,
-		"timestamp":    time.Now().Unix() * 1000,
+		"again":         1,
+		"count":         task.Quantity,
+		"screen_id":     task.ScreenID,
+		"project_id":    task.ProjectID,
+		"sku_id":        task.SKUID,
+		"order_type":    firstPositiveInt(int64(task.OrderType), 1),
+		"pay_money":     task.PayMoney,
+		"buyer_info":    string(buyerInfo),
+		"buyer":         task.Buyer,
+		"tel":           task.Tel,
+		"deliver_info":  string(deliverInfo),
+		"phone":         task.Phone,
+		"token":         token,
+		"timestamp":     nowMs,
+		"newRisk":       true,
+		"requestSource": "neul-next",
 	}
 	if task.LinkID > 0 {
 		payload["link_id"] = task.LinkID
@@ -1027,6 +1069,14 @@ func firstPresent(values map[string]any, keys ...string) any {
 		}
 	}
 	return nil
+}
+
+func hotProjectValue(values map[string]any) bool {
+	return boolValue(firstPresent(values, "hotProject", "isHotProject", "is_hot_project", "hot_project"))
+}
+
+func normalizePreparePToken(value string) string {
+	return strings.ReplaceAll(value, "=", "")
 }
 
 func extractSalesDates(raw any) []string {
