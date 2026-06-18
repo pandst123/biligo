@@ -104,6 +104,60 @@ export interface NotificationInput {
   config: Record<string, string>
 }
 
+export interface ProxyGroup {
+  id: number
+  name: string
+  type: string
+  apiProvider: string
+  apiConfig: Record<string, string>
+  lastPullStatus: string
+  lastPullMessage: string
+  lastPulledAt: string
+  lastTestStatus: string
+  lastTestMessage: string
+  lastTestedAt: string
+  nodeCount: number
+  availableNodeCount: number
+  inUse: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProxyGroupInput {
+  name: string
+  type: string
+  apiProvider: string
+  apiConfig: Record<string, string>
+}
+
+export interface ProxyNode {
+  id: number
+  groupId: number
+  name: string
+  protocol: string
+  host: string
+  port: number
+  username: string
+  password: string
+  source: string
+  lastTestStatus: string
+  lastTestMessage: string
+  lastTestLatencyMillis: number
+  lastTestIpLocation: string
+  lastTestedAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProxyNodeInput {
+  name: string
+  protocol: string
+  host: string
+  port: number
+  username: string
+  password: string
+}
+
 export interface TicketProjectHistory {
   projectId: number
   projectName: string
@@ -192,6 +246,8 @@ export interface Task {
   name: string
   accountId: number
   accountName: string
+  proxyGroupId: number
+  proxyGroupName: string
   projectId: number
   projectName: string
   screenId: number
@@ -235,6 +291,7 @@ export interface Task {
 export interface TaskInput {
   name: string
   accountId: number
+  proxyGroupId: number
   projectId: number
   projectName: string
   screenId: number
@@ -415,6 +472,21 @@ export const api = {
   testNotification: (id: number) => request<Notification>(`/api/notifications/${id}/test`, { method: 'POST' }),
   enableNotification: (id: number) => request<Notification>(`/api/notifications/${id}/enable`, { method: 'POST' }),
   disableNotification: (id: number) => request<Notification>(`/api/notifications/${id}/disable`, { method: 'POST' }),
+  listProxyGroups: () => request<ProxyGroup[]>('/api/proxy-groups'),
+  createProxyGroup: (payload: ProxyGroupInput) =>
+    request<ProxyGroup>('/api/proxy-groups', { method: 'POST', body: JSON.stringify(payload) }),
+  updateProxyGroup: (id: number, payload: ProxyGroupInput) =>
+    request<ProxyGroup>(`/api/proxy-groups/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteProxyGroup: (id: number) => request<void>(`/api/proxy-groups/${id}`, { method: 'DELETE' }),
+  listProxyNodes: (groupId: number) => request<ProxyNode[]>(`/api/proxy-groups/${groupId}/nodes`),
+  createProxyNode: (groupId: number, payload: ProxyNodeInput) =>
+    request<ProxyNode>(`/api/proxy-groups/${groupId}/nodes`, { method: 'POST', body: JSON.stringify(payload) }),
+  updateProxyNode: (id: number, payload: ProxyNodeInput) =>
+    request<ProxyNode>(`/api/proxy-nodes/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteProxyNode: (id: number) => request<void>(`/api/proxy-nodes/${id}`, { method: 'DELETE' }),
+  testProxyGroup: (groupId: number) => request<ProxyGroup>(`/api/proxy-groups/${groupId}/test`, { method: 'POST' }),
+  pullAndTestProxyGroup: (groupId: number) =>
+    request<ProxyGroup>(`/api/proxy-groups/${groupId}/pull-test`, { method: 'POST' }),
   listLogs: (taskId?: number) =>
     request<TaskLog[]>(taskId ? `/api/logs?task_id=${taskId}` : '/api/logs'),
 }

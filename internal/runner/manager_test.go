@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -135,7 +139,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0) {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, nil) {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -166,6 +170,28 @@ func TestFormatRemaining(t *testing.T) {
 	}
 	if got := formatRemaining(time.Second); got != "1秒" {
 		t.Fatalf("formatRemaining = %q, want 1秒", got)
+	}
+}
+
+func TestProxyRuntimePullBeforeUsesAPIConfig(t *testing.T) {
+	runtime := &taskProxyRuntime{
+		group: model.ProxyGroup{
+			Type: model.ProxyGroupTypeAPI,
+			APIConfig: map[string]string{
+				"pullBeforeMinutes": "2",
+			},
+		},
+	}
+	if !runtime.shouldPull(90 * time.Second) {
+		t.Fatal("shouldPull = false, want true inside configured window")
+	}
+	if runtime.shouldPull(3 * time.Minute) {
+		t.Fatal("shouldPull = true, want false outside configured window")
+	}
+
+	runtime.group.APIConfig["pullBeforeMinutes"] = "bad"
+	if runtime.pullBefore() != defaultProxyAPIPullBefore {
+		t.Fatalf("pullBefore = %v, want default %v", runtime.pullBefore(), defaultProxyAPIPullBefore)
 	}
 }
 
@@ -263,6 +289,100 @@ func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
 	}
 	if headCalls.Load() != saleStartWarmupRequestCount {
 		t.Fatalf("HEAD calls = %d, want %d", headCalls.Load(), saleStartWarmupRequestCount)
+	}
+}
+
+func TestRunnerPullsAPIProxyBeforeOrderWhenSaleAlreadyStarted(t *testing.T) {
+	var pullCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if pullCalls.Load() == 0 {
+			t.Fatalf("order request %s arrived before API proxy pull", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-API-PROXY", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-API-PROXY"}})
+		default:
+			t.Fatalf("unexpected proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer proxyServer.Close()
+
+	parsedProxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	proxyPort, err := strconv.Atoi(parsedProxyURL.Port())
+	if err != nil {
+		t.Fatalf("parse proxy port: %v", err)
+	}
+	originalPull := pullKuaidailiDPS
+	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
+		pullCalls.Add(1)
+		return []model.ProxyNodeInput{{
+			Name:     "API 拉取节点",
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     parsedProxyURL.Hostname(),
+			Port:     proxyPort,
+		}}, nil
+	}
+	t.Cleanup(func() {
+		pullKuaidailiDPS = originalPull
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	group, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name:        "API 代理组",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":          "sid",
+			"secretKey":         "skey",
+			"pullBeforeMinutes": "5",
+			"proxyProtocol":     "http",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	task = updateTaskProxyGroup(t, taskStore, task, group.ID)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-API-PROXY" {
+		t.Fatalf("OrderID = %q, want ORDER-API-PROXY", updated.OrderID)
+	}
+	if pullCalls.Load() != 1 {
+		t.Fatalf("pull calls = %d, want 1", pullCalls.Load())
+	}
+	if prepareCalls.Load() == 0 {
+		t.Fatal("order flow did not use pulled proxy node")
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundPullLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "代理 API 拉取完成，已准备代理节点") &&
+			strings.Contains(log.Message, fmt.Sprintf("%s:%d", parsedProxyURL.Hostname(), proxyPort)) {
+			foundPullLog = true
+			break
+		}
+	}
+	if !foundPullLog {
+		t.Fatalf("api pull success log missing: %#v", logs)
 	}
 }
 
@@ -405,6 +525,71 @@ func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
 	}
 	if createCalls.Load() < 2 {
 		t.Fatalf("create calls = %d, want at least 2", createCalls.Load())
+	}
+}
+
+func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+	}{
+		{name: "code 412", code: 412},
+		{name: "code 3", code: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var firstCreateCalls atomic.Int32
+			var secondCreateCalls atomic.Int32
+			firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/ticket/order/prepare":
+					writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+				case "/api/ticket/order/createV2":
+					firstCreateCalls.Add(1)
+					writeRunnerJSON(t, w, map[string]any{"code": tt.code, "message": "risk"})
+				default:
+					t.Fatalf("unexpected first proxy path: %s", r.URL.Path)
+				}
+			}))
+			defer firstProxy.Close()
+			secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/ticket/order/prepare":
+					writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+				case "/api/ticket/order/createV2":
+					secondCreateCalls.Add(1)
+					writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+				case "/api/ticket/order/getPayParam":
+					writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+				default:
+					t.Fatalf("unexpected second proxy path: %s", r.URL.Path)
+				}
+			}))
+			defer secondProxy.Close()
+
+			taskStore, task := createRunnableTask(t)
+			defer taskStore.Close()
+			groupID := createProxyGroupForRunner(t, taskStore, firstProxy.URL, secondProxy.URL)
+			task = updateTaskProxyGroup(t, taskStore, task, groupID)
+
+			manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+			if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+
+			updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+			if updated.OrderID != "ORDER-1" {
+				t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+			}
+			if firstCreateCalls.Load() != 1 {
+				t.Fatalf("first proxy create calls = %d, want 1", firstCreateCalls.Load())
+			}
+			if secondCreateCalls.Load() == 0 {
+				t.Fatal("second proxy was not used after risk code")
+			}
+		})
 	}
 }
 
@@ -921,6 +1106,77 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 		t.Fatalf("CreateTask: %v", err)
 	}
 	return taskStore, task
+}
+
+func createProxyGroupForRunner(t *testing.T, taskStore *store.Store, proxyURLs ...string) int64 {
+	t.Helper()
+	group, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name: "代理组",
+		Type: model.ProxyGroupTypeStatic,
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	for index, rawURL := range proxyURLs {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			t.Fatalf("parse proxy URL: %v", err)
+		}
+		host := parsed.Hostname()
+		port, err := strconv.Atoi(parsed.Port())
+		if err != nil {
+			t.Fatalf("parse proxy port: %v", err)
+		}
+		if _, err := taskStore.CreateProxyNode(context.Background(), group.ID, model.ProxyNodeInput{
+			Name:     fmt.Sprintf("代理-%d", index+1),
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     host,
+			Port:     port,
+		}); err != nil {
+			t.Fatalf("CreateProxyNode: %v", err)
+		}
+	}
+	return group.ID
+}
+
+func updateTaskProxyGroup(t *testing.T, taskStore *store.Store, task model.Task, proxyGroupID int64) model.Task {
+	t.Helper()
+	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
+		Name:               task.Name,
+		AccountID:          task.AccountID,
+		ProxyGroupID:       proxyGroupID,
+		ProjectID:          task.ProjectID,
+		ProjectName:        task.ProjectName,
+		ScreenID:           task.ScreenID,
+		SKUID:              task.SKUID,
+		SessionName:        task.SessionName,
+		TicketLevel:        task.TicketLevel,
+		TicketDisplay:      task.TicketDisplay,
+		TicketPrice:        task.TicketPrice,
+		SaleStart:          task.SaleStart,
+		SaleStatus:         task.SaleStatus,
+		LinkID:             task.LinkID,
+		IsHotProject:       task.IsHotProject,
+		TaskMode:           task.TaskMode,
+		DurationMode:       task.DurationMode,
+		SelectedTickets:    task.SelectedTickets,
+		OrderType:          task.OrderType,
+		PayMoney:           task.PayMoney,
+		BuyerInfo:          task.BuyerInfo,
+		Buyer:              task.Buyer,
+		Tel:                task.Tel,
+		DeliverInfo:        task.DeliverInfo,
+		Phone:              task.Phone,
+		TimeSyncStrategy:   task.TimeSyncStrategy,
+		Quantity:           task.Quantity,
+		StartAt:            task.StartAt,
+		EndAt:              task.EndAt,
+		PollIntervalMillis: task.PollIntervalMillis,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask proxy group: %v", err)
+	}
+	return updated
 }
 
 func createRestockTask(t *testing.T, durationMode string, endAt string) (*store.Store, model.Task) {

@@ -122,6 +122,21 @@ func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
 	return client
 }
 
+func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = newKeepAliveHTTPClient()
+	}
+	if c == nil {
+		return NewClient(httpClient)
+	}
+	return &Client{
+		httpClient:  httpClient,
+		showBaseURL: c.showBaseURL,
+		mallBaseURL: c.mallBaseURL,
+		apiBaseURL:  c.apiBaseURL,
+	}
+}
+
 func ExtractProjectID(projectInput string) (int64, error) {
 	text := cleanProjectIDToken(projectInput)
 	if text == "" {

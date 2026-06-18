@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/notify"
+	proxynet "github.com/fdcs99/biligo/internal/proxy"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/fdcs99/biligo/internal/timesync"
 )
@@ -36,7 +38,10 @@ const (
 	saleStartWaitReportInterval = time.Second
 	saleStartWarmupBefore       = 30 * time.Second
 	saleStartWarmupRequestCount = 5
+	defaultProxyAPIPullBefore   = 5 * time.Minute
 )
+
+var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
 	return NewManagerWithTimeSync(store, ticket, hub, timesync.NewClient(nil))
@@ -177,14 +182,25 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 		m.setRuntime(taskID, "failed", "无法解析票档起售时间："+err.Error(), "error")
 		return
 	}
+	proxyRuntime, err := m.newTaskProxyRuntime(ctx, taskID, task)
+	if err != nil {
+		m.setRuntime(taskID, "failed", "代理组初始化失败："+err.Error(), "error")
+		return
+	}
 	endAt := saleStart.Add(10 * time.Minute)
 	if parsedEnd, err := parseTaskTime(task.EndAt); err == nil && !parsedEnd.IsZero() {
 		endAt = parsedEnd
 	}
 	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
 
-	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset) {
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime) {
 		return
+	}
+	if proxyRuntime != nil {
+		if err := proxyRuntime.ensureReady(ctx); err != nil {
+			m.setRuntime(taskID, "failed", "代理组无可用节点："+err.Error(), "error")
+			return
+		}
 	}
 
 	m.setRuntime(taskID, "running", "已到起售时间，开始准备订单。", "info")
@@ -196,7 +212,7 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 	deadlineExceeded := func() bool {
 		return nowWithOffset(timeOffset).After(endAt)
 	}
-	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded)
+	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, proxyRuntime)
 }
 
 func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, task model.Task) {
@@ -205,14 +221,25 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 		m.setRuntime(taskID, "failed", "无法解析票档起售时间："+err.Error(), "error")
 		return
 	}
+	proxyRuntime, err := m.newTaskProxyRuntime(ctx, taskID, task)
+	if err != nil {
+		m.setRuntime(taskID, "failed", "代理组初始化失败："+err.Error(), "error")
+		return
+	}
 	rushDuration := time.Duration(task.RushDurationSeconds) * time.Second
 	if rushDuration <= 0 {
 		rushDuration = time.Duration(model.DefaultRushDurationSeconds) * time.Second
 	}
 	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
 
-	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset) {
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime) {
 		return
+	}
+	if proxyRuntime != nil {
+		if err := proxyRuntime.ensureReady(ctx); err != nil {
+			m.setRuntime(taskID, "failed", "代理组无可用节点："+err.Error(), "error")
+			return
+		}
 	}
 
 	m.setRuntime(taskID, "running", fmt.Sprintf("已到起售时间，开始抢票；%d 秒后切换回流捡漏。", int(rushDuration.Seconds())), "info")
@@ -234,7 +261,7 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 		}
 		return !nowWithOffset(timeOffset).Before(rushStartedAt.Add(rushDuration))
 	}
-	if m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage) {
+	if m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime) {
 		return
 	}
 	if ctx.Err() != nil {
@@ -298,7 +325,7 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 				m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("更新命中票种失败："+err.Error()), "warn", checkedAt)
 			} else {
 				m.publishTaskAndLog(matchedTask, log)
-				switch m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded) {
+				switch m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded, nil) {
 				case orderAttemptFinished, orderAttemptStopped:
 					return
 				}
@@ -315,11 +342,11 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 	}
 }
 
-func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool) bool {
-	return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。")
+func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) bool {
+	return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime)
 }
 
-func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string) bool {
+func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime) bool {
 	for {
 		if ctx.Err() != nil {
 			return false
@@ -338,14 +365,18 @@ func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, co
 		if beforeAttempt != nil {
 			beforeAttempt()
 		}
-		prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
+		client := m.ticketClient(proxyRuntime)
+		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
+			if m.switchProxyOnRequestError(ctx, taskID, proxyRuntime, err) {
+				continue
+			}
 			if !m.retryRunError(ctx, taskID, "订单准备失败："+err.Error(), checkedAt, interval) {
 				return false
 			}
 			continue
 		}
-		result, err := m.ticket.CreateOrder(ctx, latestTask, cookie, prepared)
+		result, err := client.CreateOrder(ctx, latestTask, cookie, prepared)
 		if err != nil {
 			if result.Code == 100079 {
 				m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
@@ -353,6 +384,11 @@ func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, co
 			}
 			if result.Code == 100034 && result.PayMoney > 0 {
 				m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+			}
+			if shouldSwitchProxyForCreateError(result, err) {
+				if m.switchProxy(ctx, taskID, proxyRuntime, "创建订单触发代理切换："+err.Error()) {
+					continue
+				}
 			}
 			if !m.retryRunError(ctx, taskID, "创建订单失败："+err.Error(), checkedAt, interval) {
 				return false
@@ -369,7 +405,7 @@ func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, co
 			}
 			continue
 		}
-		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel)
+		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime)
 		if !ok {
 			return false
 		}
@@ -397,7 +433,7 @@ const (
 	orderAttemptStopped
 )
 
-func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool) orderAttemptResult {
+func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) orderAttemptResult {
 	if ctx.Err() != nil {
 		return orderAttemptStopped
 	}
@@ -412,12 +448,13 @@ func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie stri
 	}
 	checkedAt := checkedAtText()
 
-	prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
+	client := m.ticketClient(proxyRuntime)
+	prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
 	if err != nil {
 		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单准备失败："+err.Error()), "warn", checkedAt)
 		return orderAttemptRetryDetection
 	}
-	result, err := m.ticket.CreateOrder(ctx, latestTask, cookie, prepared)
+	result, err := client.CreateOrder(ctx, latestTask, cookie, prepared)
 	if err != nil {
 		if result.Code == 100079 {
 			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
@@ -442,7 +479,7 @@ func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie stri
 	if interval <= 0 {
 		interval = time.Second
 	}
-	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn")
+	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime)
 	if !ok {
 		return orderAttemptStopped
 	}
@@ -472,12 +509,253 @@ func (m *Manager) applyPayMoneyUpdate(taskID int64, oldPayMoney int64, newPayMon
 	}
 }
 
+type taskProxyRuntime struct {
+	manager *Manager
+	taskID  int64
+	group   model.ProxyGroup
+	nodes   []model.ProxyNode
+	index   int
+	client  *biliticket.Client
+	pulled  bool
+	triedAt time.Time
+}
+
+func (m *Manager) newTaskProxyRuntime(ctx context.Context, taskID int64, task model.Task) (*taskProxyRuntime, error) {
+	if task.ProxyGroupID <= 0 || model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRestock {
+		return nil, nil
+	}
+	group, err := m.store.GetProxyGroup(ctx, task.ProxyGroupID)
+	if err != nil {
+		return nil, err
+	}
+	runtime := &taskProxyRuntime{
+		manager: m,
+		taskID:  taskID,
+		group:   group,
+		index:   -1,
+	}
+	if group.Type == model.ProxyGroupTypeAPI {
+		return runtime, nil
+	}
+	if err := runtime.reloadNodes(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtime.activateIndex(0); err != nil {
+		return nil, err
+	}
+	m.setRuntime(taskID, "waiting_start", "已启用代理组："+group.Name+"。", "info")
+	return runtime, nil
+}
+
+func (p *taskProxyRuntime) shouldPull(remaining time.Duration) bool {
+	if p == nil || p.group.Type != model.ProxyGroupTypeAPI || p.pulled || remaining > p.pullBefore() {
+		return false
+	}
+	return p.triedAt.IsZero() || time.Since(p.triedAt) >= 10*time.Second
+}
+
+func (p *taskProxyRuntime) pullBefore() time.Duration {
+	if p == nil || p.group.APIConfig == nil {
+		return defaultProxyAPIPullBefore
+	}
+	raw := strings.TrimSpace(p.group.APIConfig["pullBeforeMinutes"])
+	if raw == "" {
+		return defaultProxyAPIPullBefore
+	}
+	minutes, err := strconv.Atoi(raw)
+	if err != nil || minutes <= 0 {
+		return defaultProxyAPIPullBefore
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (p *taskProxyRuntime) pullAndActivate(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	if p.group.Type != model.ProxyGroupTypeAPI {
+		return p.ensureReady(ctx)
+	}
+	if p.group.APIProvider != model.ProxyProviderKuaidailiDPS {
+		return errors.New("API 代理组仅支持快代理私密代理")
+	}
+	p.triedAt = time.Now()
+	pullCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	nodes, err := pullKuaidailiDPS(pullCtx, p.group)
+	cancel()
+	if err != nil {
+		_, _ = p.manager.store.SetProxyGroupPullResult(context.Background(), p.group.ID, "error", err.Error())
+		return err
+	}
+	if _, err := p.manager.store.ReplaceAPIProxyNodes(context.Background(), p.group.ID, nodes); err != nil {
+		return err
+	}
+	group, err := p.manager.store.SetProxyGroupPullResult(context.Background(), p.group.ID, "success", fmt.Sprintf("已拉取 %d 个代理节点。", len(nodes)))
+	if err == nil {
+		p.group = group
+	}
+	p.pulled = true
+	if err := p.reloadNodes(ctx); err != nil {
+		return err
+	}
+	return p.activateIndex(0)
+}
+
+func (p *taskProxyRuntime) ensureReady(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	if p.client != nil {
+		return nil
+	}
+	if p.group.Type == model.ProxyGroupTypeAPI && !p.pulled {
+		if err := p.pullAndActivate(ctx); err != nil {
+			return err
+		}
+		p.manager.setRuntime(p.taskID, "waiting_start", proxyAPIReadyMessage(p.currentNode()), "info")
+		return nil
+	}
+	if err := p.reloadNodes(ctx); err != nil {
+		return err
+	}
+	return p.activateIndex(0)
+}
+
+func (p *taskProxyRuntime) reloadNodes(ctx context.Context) error {
+	nodes, err := p.manager.store.ListProxyNodes(ctx, p.group.ID)
+	if err != nil {
+		return err
+	}
+	available := make([]model.ProxyNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node.LastTestStatus == "error" {
+			continue
+		}
+		available = append(available, node)
+	}
+	if len(available) == 0 {
+		available = nodes
+	}
+	if len(available) == 0 {
+		return errors.New("代理组没有节点")
+	}
+	p.nodes = available
+	return nil
+}
+
+func (p *taskProxyRuntime) activateIndex(index int) error {
+	if p == nil {
+		return nil
+	}
+	if len(p.nodes) == 0 {
+		return errors.New("代理组没有节点")
+	}
+	if index < 0 {
+		index = 0
+	}
+	index = index % len(p.nodes)
+	client, err := proxynet.NewHTTPClient(p.nodes[index])
+	if err != nil {
+		return err
+	}
+	p.index = index
+	p.client = p.manager.ticket.WithHTTPClient(client)
+	return nil
+}
+
+func (p *taskProxyRuntime) currentNode() model.ProxyNode {
+	if p == nil || p.index < 0 || p.index >= len(p.nodes) {
+		return model.ProxyNode{}
+	}
+	return p.nodes[p.index]
+}
+
+func (p *taskProxyRuntime) switchNext(ctx context.Context, reason string) error {
+	if p == nil {
+		return errors.New("任务未启用代理组")
+	}
+	if len(p.nodes) < 2 {
+		return errors.New("代理组没有可切换的下一个节点")
+	}
+	current := p.currentNode()
+	if current.ID > 0 && strings.TrimSpace(reason) != "" {
+		_, _ = p.manager.store.SetProxyNodeTestResult(context.Background(), current.ID, "error", reason, 0, "")
+	}
+	next := p.index + 1
+	if next >= len(p.nodes) {
+		next = 0
+	}
+	if err := p.activateIndex(next); err != nil {
+		if err := p.reloadNodes(ctx); err != nil {
+			return err
+		}
+		return p.activateIndex(0)
+	}
+	return nil
+}
+
+func (m *Manager) ticketClient(proxyRuntime *taskProxyRuntime) *biliticket.Client {
+	if proxyRuntime != nil && proxyRuntime.client != nil {
+		return proxyRuntime.client
+	}
+	return m.ticket
+}
+
+func shouldSwitchProxyForCreateError(result biliticket.OrderCreateResult, err error) bool {
+	if result.Code == 412 || result.Code == 3 {
+		return true
+	}
+	return proxynet.IsRequestError(err)
+}
+
+func (m *Manager) switchProxyOnRequestError(ctx context.Context, taskID int64, proxyRuntime *taskProxyRuntime, err error) bool {
+	if !proxynet.IsRequestError(err) {
+		return false
+	}
+	return m.switchProxy(ctx, taskID, proxyRuntime, "代理请求失败："+err.Error())
+}
+
+func (m *Manager) switchProxy(ctx context.Context, taskID int64, proxyRuntime *taskProxyRuntime, reason string) bool {
+	if proxyRuntime == nil {
+		return false
+	}
+	if err := proxyRuntime.switchNext(ctx, reason); err != nil {
+		m.setRuntime(taskID, "running", "代理切换失败："+err.Error()+"，继续使用当前节点重试。", "warn")
+		return false
+	}
+	node := proxyRuntime.currentNode()
+	m.setRuntime(taskID, "running", fmt.Sprintf("%s，已切换到代理节点 %s。", strings.TrimRight(reason, "。"), proxyNodeLabel(node)), "warn")
+	return true
+}
+
+func proxyNodeLabel(node model.ProxyNode) string {
+	name := strings.TrimSpace(node.Name)
+	if name != "" {
+		return name
+	}
+	if node.Host != "" && node.Port > 0 {
+		return proxyNodeAddress(node)
+	}
+	return "未知节点"
+}
+
+func proxyNodeAddress(node model.ProxyNode) string {
+	if node.Host != "" && node.Port > 0 {
+		return fmt.Sprintf("%s:%d", node.Host, node.Port)
+	}
+	return "未知地址"
+}
+
+func proxyAPIReadyMessage(node model.ProxyNode) string {
+	return fmt.Sprintf("代理 API 拉取完成，已准备代理节点 %s。", proxyNodeAddress(node))
+}
+
 func (m *Manager) retryRunError(ctx context.Context, taskID int64, message string, checkedAt string, interval time.Duration) bool {
 	m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage(message), "warn", checkedAt)
 	return m.wait(ctx, interval)
 }
 
-func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string) (biliticket.PayParamResult, bool) {
+func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime) (biliticket.PayParamResult, bool) {
 	for {
 		if ctx.Err() != nil {
 			return biliticket.PayParamResult{}, false
@@ -486,9 +764,12 @@ func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID str
 			m.setRuntime(taskID, deadlineStatus, deadlineMessage, deadlineLevel)
 			return biliticket.PayParamResult{}, false
 		}
-		payParam, err := m.ticket.GetPayParam(ctx, orderID, cookie)
+		payParam, err := m.ticketClient(proxyRuntime).GetPayParam(ctx, orderID, cookie)
 		if err == nil {
 			return payParam, true
+		}
+		if m.switchProxyOnRequestError(ctx, taskID, proxyRuntime, err) {
+			continue
 		}
 		if !m.retryRunError(ctx, taskID, "订单创建成功，但获取支付二维码失败："+err.Error(), checkedAtText(), interval) {
 			return biliticket.PayParamResult{}, false
@@ -558,7 +839,7 @@ func (m *Manager) wait(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration) bool {
+func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration, proxyRuntime *taskProxyRuntime) bool {
 	nextReportAt := time.Now().Add(saleStartWaitReportInterval)
 	warmedUp := false
 	for {
@@ -569,9 +850,22 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 		if ctx.Err() != nil {
 			return false
 		}
+		if proxyRuntime != nil && proxyRuntime.shouldPull(remaining) {
+			if err := proxyRuntime.pullAndActivate(ctx); err != nil {
+				m.setRuntime(taskID, "waiting_start", "代理 API 拉取失败："+err.Error(), "warn")
+			} else {
+				m.setRuntime(taskID, "waiting_start", proxyAPIReadyMessage(proxyRuntime.currentNode()), "info")
+			}
+		}
 		if !warmedUp && remaining <= saleStartWarmupBefore {
 			warmedUp = true
-			m.warmupShow(ctx, taskID)
+			if proxyRuntime != nil {
+				if err := proxyRuntime.ensureReady(ctx); err != nil {
+					m.setRuntime(taskID, "failed", "预热前准备代理失败："+err.Error(), "error")
+					return false
+				}
+			}
+			m.warmupShow(ctx, taskID, proxyRuntime)
 		}
 		now := time.Now()
 		if !now.Before(nextReportAt) {
@@ -589,13 +883,13 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 }
 
 // 预热连接
-func (m *Manager) warmupShow(ctx context.Context, taskID int64) {
+func (m *Manager) warmupShow(ctx context.Context, taskID int64, proxyRuntime *taskProxyRuntime) {
 	if m.ticket == nil {
 		return
 	}
 	message := fmt.Sprintf("距离起售不足 %d 秒，开始预热抢票连接。", int(saleStartWarmupBefore.Seconds()))
 	m.setRuntime(taskID, "waiting_start", message, "info")
-	if err := m.ticket.WarmupShow(ctx, saleStartWarmupRequestCount); err != nil {
+	if err := m.ticketClient(proxyRuntime).WarmupShow(ctx, saleStartWarmupRequestCount); err != nil {
 		m.setRuntime(taskID, "waiting_start", "预热抢票连接失败："+err.Error(), "warn")
 		return
 	}

@@ -258,6 +258,101 @@ func TestNotificationStoreCRUD(t *testing.T) {
 	}
 }
 
+func TestProxyStoreCRUDAndTaskReference(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	group, err := store.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name:        "快代理",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":          "sid",
+			"secretKey":         "skey",
+			"signType":          "hmacsha1",
+			"num":               "2",
+			"pullBeforeMinutes": "3",
+			"proxyProtocol":     "http",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	if group.ID == 0 || group.Type != model.ProxyGroupTypeAPI || group.APIConfig["secretId"] != "sid" || group.APIConfig["pullBeforeMinutes"] != "3" {
+		t.Fatalf("unexpected proxy group: %#v", group)
+	}
+	node, err := store.CreateProxyNode(context.Background(), group.ID, model.ProxyNodeInput{
+		Name:     "节点",
+		Protocol: model.ProxyProtocolSOCKS5,
+		Host:     "127.0.0.1",
+		Port:     1080,
+		Username: "user",
+		Password: "pass",
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyNode: %v", err)
+	}
+	node, err = store.SetProxyNodeTestResult(context.Background(), node.ID, "success", "ok", 123, "当前 IP：127.0.0.1 来自于：本地")
+	if err != nil {
+		t.Fatalf("SetProxyNodeTestResult: %v", err)
+	}
+	if node.LastTestStatus != "success" || node.LastTestLatencyMillis != 123 || node.LastTestIPLocation == "" || node.LastTestedAt == "" {
+		t.Fatalf("unexpected node test result: %#v", node)
+	}
+	group, err = store.SetProxyGroupPullResult(context.Background(), group.ID, "success", "pulled")
+	if err != nil {
+		t.Fatalf("SetProxyGroupPullResult: %v", err)
+	}
+	if group.LastPullStatus != "success" || group.NodeCount != 1 || group.AvailableNodeCount != 1 {
+		t.Fatalf("unexpected group after pull result: %#v", group)
+	}
+
+	task := createTestTask(t, store, "代理任务")
+	task, err = store.UpdateTask(context.Background(), task.ID, model.TaskInput{
+		Name:               task.Name,
+		AccountID:          task.AccountID,
+		ProxyGroupID:       group.ID,
+		ProjectID:          task.ProjectID,
+		ProjectName:        task.ProjectName,
+		ScreenID:           task.ScreenID,
+		SKUID:              task.SKUID,
+		SessionName:        task.SessionName,
+		TicketLevel:        task.TicketLevel,
+		TicketDisplay:      task.TicketDisplay,
+		TicketPrice:        task.TicketPrice,
+		SaleStart:          task.SaleStart,
+		OrderType:          task.OrderType,
+		BuyerInfo:          task.BuyerInfo,
+		Buyer:              task.Buyer,
+		Tel:                task.Tel,
+		DeliverInfo:        task.DeliverInfo,
+		PollIntervalMillis: task.PollIntervalMillis,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+	if task.ProxyGroupID != group.ID || task.ProxyGroupName != "快代理" {
+		t.Fatalf("task proxy fields = %d/%q", task.ProxyGroupID, task.ProxyGroupName)
+	}
+	task, _, err = store.SetTaskRuntime(context.Background(), task.ID, model.TaskRuntimeUpdate{
+		Status:      "running",
+		LastMessage: "running",
+	}, "info")
+	if err != nil {
+		t.Fatalf("SetTaskRuntime: %v", err)
+	}
+	inUse, err := store.ProxyGroupInUse(context.Background(), group.ID)
+	if err != nil {
+		t.Fatalf("ProxyGroupInUse: %v", err)
+	}
+	if !inUse {
+		t.Fatal("ProxyGroupInUse = false, want true")
+	}
+}
+
 func TestPauseInterruptedTasks(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

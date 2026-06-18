@@ -6,6 +6,7 @@ import {
   Check,
   CirclePlus,
   Close,
+  Connection,
   CopyDocument,
   Delete,
   Document,
@@ -27,6 +28,10 @@ import type {
   Health,
   Notification,
   NotificationInput,
+  ProxyGroup,
+  ProxyGroupInput,
+  ProxyNode,
+  ProxyNodeInput,
   SessionSummary,
   Task,
   TaskInput,
@@ -48,13 +53,14 @@ import {
   setUnauthorizedHandler,
 } from './api'
 
-type SectionKey = 'accounts' | 'notifications' | 'taskConfig' | 'taskStatus'
+type SectionKey = 'accounts' | 'notifications' | 'proxies' | 'taskConfig' | 'taskStatus'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
 
 const sections: Array<{ key: SectionKey; label: string }> = [
   { key: 'accounts', label: '哔哩哔哩账号管理' },
   { key: 'notifications', label: '通知管理' },
+  { key: 'proxies', label: '代理设置' },
   { key: 'taskConfig', label: '任务配置' },
   { key: 'taskStatus', label: '任务管理' },
 ]
@@ -75,12 +81,16 @@ const panelAuth = reactive({
 
 const accounts = ref<Account[]>([])
 const notifications = ref<Notification[]>([])
+const proxyGroups = ref<ProxyGroup[]>([])
+const proxyNodes = ref<ProxyNode[]>([])
 const ticketProjectHistories = ref<TicketProjectHistory[]>([])
 const tasks = ref<Task[]>([])
 const logs = ref<TaskLog[]>([])
 
 const editingAccountId = ref<number | null>(null)
 const editingNotificationId = ref<number | null>(null)
+const editingProxyGroupId = ref<number | null>(null)
+const editingProxyNodeId = ref<number | null>(null)
 const editingTaskId = ref<number | null>(null)
 
 const accountForm = reactive<AccountInput>({
@@ -95,6 +105,29 @@ const notificationForm = reactive<NotificationInput>({
   config: {
     token: '',
   },
+})
+
+const proxyGroupForm = reactive<ProxyGroupInput>({
+  name: '',
+  type: 'static',
+  apiProvider: 'kuaidaili_dps',
+  apiConfig: {
+    secretId: '',
+    secretKey: '',
+    signType: 'hmacsha1',
+    num: '5',
+    pullBeforeMinutes: '5',
+    proxyProtocol: 'http',
+  },
+})
+
+const proxyNodeForm = reactive<ProxyNodeInput>({
+  name: '',
+  protocol: 'http',
+  host: '',
+  port: 0,
+  username: '',
+  password: '',
 })
 
 const qrLogin = reactive({
@@ -115,6 +148,7 @@ let qrPollTimer: number | undefined
 const taskForm = reactive<TaskInput>({
   name: '',
   accountId: 0,
+  proxyGroupId: 0,
   projectId: 0,
   projectName: '',
   screenId: 0,
@@ -146,6 +180,7 @@ const taskForm = reactive<TaskInput>({
 })
 
 const selectedTaskId = ref<number | null>(null)
+const selectedProxyGroupId = ref<number | null>(null)
 const mobileLogMode = ref<'empty' | 'task' | 'all'>('empty')
 const ticketProjectInput = ref('')
 const fetchedTicketProject = ref<TicketProject | null>(null)
@@ -180,6 +215,7 @@ const isHybridTaskForm = computed(() => taskForm.taskMode === 'rush_restock')
 const hasRushTaskSection = computed(() => taskForm.taskMode === 'rush' || taskForm.taskMode === 'rush_restock')
 const hasRestockTaskSection = computed(() => taskForm.taskMode === 'restock' || taskForm.taskMode === 'rush_restock')
 const isRestockUnlimitedTaskForm = computed(() => hasRestockTaskSection.value && taskForm.durationMode === 'unlimited')
+const selectableProxyGroups = computed(() => proxyGroups.value.filter((group) => (group.nodeCount > 0 || group.type === 'api') && !group.inUse))
 const canSaveTask = computed(
   () =>
     taskForm.name.trim() !== '' &&
@@ -198,6 +234,24 @@ const canSaveNotification = computed(
   () => notificationForm.name.trim() !== '' &&
     ['pushplus', 'bark'].includes(notificationForm.provider) &&
     (notificationForm.config.token ?? '').trim() !== '',
+)
+const canSaveProxyGroup = computed(
+  () =>
+    proxyGroupForm.name.trim() !== '' &&
+    (proxyGroupForm.type !== 'api' ||
+      (proxyGroupForm.apiProvider === 'kuaidaili_dps' &&
+        (proxyGroupForm.apiConfig.secretId ?? '').trim() !== '' &&
+        (proxyGroupForm.apiConfig.secretKey ?? '').trim() !== '')),
+)
+const selectedProxyGroup = computed(() => proxyGroups.value.find((group) => group.id === selectedProxyGroupId.value) ?? null)
+const selectedProxyGroupIsAPI = computed(() => selectedProxyGroup.value?.type === 'api')
+const proxyNodeFormLocked = computed(() => selectedProxyGroupIsAPI.value && editingProxyNodeId.value === null)
+const canSaveProxyNode = computed(
+  () => selectedProxyGroupId.value !== null &&
+    !proxyNodeFormLocked.value &&
+    proxyNodeForm.host.trim() !== '' &&
+    proxyNodeForm.port > 0 &&
+    proxyNodeForm.port <= 65535,
 )
 
 async function run(action: () => Promise<void>, success?: string) {
@@ -220,10 +274,11 @@ async function loadAll() {
   await run(async () => {
     health.value = await api.health()
 
-    const [sessionData, accountData, notificationData, historyData, taskData, logData] = await Promise.all([
+    const [sessionData, accountData, notificationData, proxyGroupData, historyData, taskData, logData] = await Promise.all([
       api.session(),
       api.listAccounts(),
       api.listNotifications(),
+      api.listProxyGroups(),
       api.listTicketProjectHistory(),
       api.listTasks(),
       api.listLogs(),
@@ -231,6 +286,7 @@ async function loadAll() {
     session.value = sessionData
     accounts.value = accountData ?? []
     notifications.value = notificationData ?? []
+    proxyGroups.value = proxyGroupData ?? []
     ticketProjectHistories.value = historyData ?? []
     tasks.value = taskData ?? []
     logs.value = logData ?? []
@@ -309,6 +365,8 @@ function clearPanelSession() {
   stopClock()
   clearPanelAuthExpiry()
   accounts.value = []
+  proxyGroups.value = []
+  proxyNodes.value = []
   ticketProjectHistories.value = []
   tasks.value = []
   logs.value = []
@@ -371,6 +429,7 @@ function sectionIcon(section: SectionKey) {
   const map = {
     accounts: User,
     notifications: Bell,
+    proxies: Connection,
     taskConfig: Setting,
     taskStatus: Monitor,
   }
@@ -644,12 +703,197 @@ async function setNotificationEnabled(id: number, enabled: boolean) {
   }, enabled ? '通知接口已启用' : '通知接口已停用')
 }
 
+function resetProxyGroupForm() {
+  editingProxyGroupId.value = null
+  Object.assign(proxyGroupForm, {
+    name: '',
+    type: 'static',
+    apiProvider: 'kuaidaili_dps',
+    apiConfig: {
+      secretId: '',
+      secretKey: '',
+      signType: 'hmacsha1',
+      num: '5',
+      pullBeforeMinutes: '5',
+      proxyProtocol: 'http',
+    },
+  })
+}
+
+function resetProxyNodeForm() {
+  editingProxyNodeId.value = null
+  Object.assign(proxyNodeForm, {
+    name: '',
+    protocol: 'http',
+    host: '',
+    port: 0,
+    username: '',
+    password: '',
+  })
+}
+
+async function refreshProxyGroups() {
+  proxyGroups.value = await api.listProxyGroups()
+}
+
+async function selectProxyGroup(group: ProxyGroup) {
+  selectedProxyGroupId.value = group.id
+  proxyNodes.value = await api.listProxyNodes(group.id)
+  resetProxyNodeForm()
+}
+
+async function handleProxyGroupSelection(id: number) {
+  const group = proxyGroups.value.find((item) => item.id === id)
+  if (group) {
+    await selectProxyGroup(group)
+  }
+}
+
+function editProxyGroup(group: ProxyGroup) {
+  editingProxyGroupId.value = group.id
+  Object.assign(proxyGroupForm, {
+    name: group.name,
+    type: group.type || 'static',
+    apiProvider: group.apiProvider || 'kuaidaili_dps',
+    apiConfig: {
+      secretId: group.apiConfig?.secretId ?? '',
+      secretKey: group.apiConfig?.secretKey ?? '',
+      secretToken: group.apiConfig?.secretToken ?? '',
+      signType: group.apiConfig?.signType ?? 'hmacsha1',
+      num: group.apiConfig?.num ?? '5',
+      pullBeforeMinutes: group.apiConfig?.pullBeforeMinutes ?? '5',
+      proxyProtocol: group.apiConfig?.proxyProtocol ?? 'http',
+      area: group.apiConfig?.area ?? '',
+    },
+  })
+  selectedProxyGroupId.value = group.id
+  activeSection.value = 'proxies'
+  void selectProxyGroup(group)
+}
+
+async function saveProxyGroup() {
+  await run(async () => {
+    const payload: ProxyGroupInput = {
+      name: proxyGroupForm.name.trim(),
+      type: proxyGroupForm.type,
+      apiProvider: proxyGroupForm.type === 'api' ? proxyGroupForm.apiProvider : '',
+      apiConfig: proxyGroupForm.type === 'api' ? cleanConfig(proxyGroupForm.apiConfig) : {},
+    }
+    const group = editingProxyGroupId.value
+      ? await api.updateProxyGroup(editingProxyGroupId.value, payload)
+      : await api.createProxyGroup(payload)
+    await refreshProxyGroups()
+    selectedProxyGroupId.value = group.id
+    proxyNodes.value = await api.listProxyNodes(group.id)
+    resetProxyGroupForm()
+  }, editingProxyGroupId.value ? '代理组已更新' : '代理组已创建')
+}
+
+async function confirmDeleteProxyGroup(group: ProxyGroup) {
+  try {
+    await ElMessageBox.confirm(`确认删除代理组「${group.name}」？`, '删除代理组', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return
+  }
+  await run(async () => {
+    await api.deleteProxyGroup(group.id)
+    if (selectedProxyGroupId.value === group.id) {
+      selectedProxyGroupId.value = null
+      proxyNodes.value = []
+    }
+    await refreshProxyGroups()
+  }, '代理组已删除')
+}
+
+function editProxyNode(node: ProxyNode) {
+  editingProxyNodeId.value = node.id
+  Object.assign(proxyNodeForm, {
+    name: node.name,
+    protocol: node.protocol || 'http',
+    host: node.host,
+    port: node.port,
+    username: node.username,
+    password: node.password,
+  })
+}
+
+async function saveProxyNode() {
+  await run(async () => {
+    if (selectedProxyGroupId.value === null) {
+      throw new Error('请先选择代理组')
+    }
+    if (proxyNodeFormLocked.value) {
+      throw new Error('API 代理组不支持手动添加代理节点，请使用拉取检测')
+    }
+    if (editingProxyNodeId.value) {
+      await api.updateProxyNode(editingProxyNodeId.value, proxyNodeForm)
+    } else {
+      await api.createProxyNode(selectedProxyGroupId.value, proxyNodeForm)
+    }
+    proxyNodes.value = await api.listProxyNodes(selectedProxyGroupId.value)
+    await refreshProxyGroups()
+    resetProxyNodeForm()
+  }, editingProxyNodeId.value ? '代理节点已更新' : '代理节点已添加')
+}
+
+async function deleteProxyNode(node: ProxyNode) {
+  await run(async () => {
+    await api.deleteProxyNode(node.id)
+    if (selectedProxyGroupId.value !== null) {
+      proxyNodes.value = await api.listProxyNodes(selectedProxyGroupId.value)
+    }
+    await refreshProxyGroups()
+  }, '代理节点已删除')
+}
+
+async function testProxyGroup(group: ProxyGroup) {
+  await run(async () => {
+    const tested = await api.testProxyGroup(group.id)
+    await refreshProxyGroups()
+    if (selectedProxyGroupId.value === group.id) {
+      proxyNodes.value = await api.listProxyNodes(group.id)
+    }
+    if (tested.lastTestStatus === 'error') {
+      throw new Error(tested.lastTestMessage || '代理检测失败')
+    }
+  }, '代理检测完成')
+}
+
+async function pullAndTestProxyGroup(group: ProxyGroup) {
+  await run(async () => {
+    const tested = await api.pullAndTestProxyGroup(group.id)
+    await refreshProxyGroups()
+    selectedProxyGroupId.value = group.id
+    proxyNodes.value = await api.listProxyNodes(group.id)
+    if (tested.lastTestStatus === 'error') {
+      throw new Error(tested.lastTestMessage || '代理检测失败')
+    }
+  }, '代理已拉取并检测')
+}
+
+function cleanConfig(config: Record<string, string>) {
+  const output: Record<string, string> = {}
+  Object.entries(config).forEach(([key, value]) => {
+    const normalized = (value ?? '').trim()
+    if (normalized) {
+      output[key] = normalized
+    }
+  })
+  return output
+}
+
 function resetTaskForm() {
   editingTaskId.value = null
   resetTicketProjectSelection()
   Object.assign(taskForm, {
     name: '',
     accountId: accounts.value[0]?.id ?? 0,
+    proxyGroupId: 0,
     projectId: 0,
     projectName: '',
     screenId: 0,
@@ -686,6 +930,7 @@ function editTask(task: Task) {
   Object.assign(taskForm, {
     name: task.name,
     accountId: task.accountId,
+    proxyGroupId: task.proxyGroupId || 0,
     projectId: task.projectId,
     projectName: task.projectName,
     screenId: task.screenId,
@@ -792,6 +1037,9 @@ function clearSelectedTicketFields() {
 function normalizeTaskModeFields() {
   if (!['rush', 'restock', 'rush_restock'].includes(taskForm.taskMode)) {
     taskForm.taskMode = 'rush'
+  }
+  if (!hasRushTaskSection.value) {
+    taskForm.proxyGroupId = 0
   }
   if (!hasRestockTaskSection.value) {
     taskForm.durationMode = 'limited'
@@ -1572,6 +1820,32 @@ function notificationTestTagType(status: string) {
   return 'info'
 }
 
+function proxyGroupTypeLabel(type: string) {
+  return type === 'api' ? 'API 代理组' : '普通代理组'
+}
+
+function proxyProtocolLabel(protocol: string) {
+  if (protocol === 'socks5') {
+    return 'SOCKS5'
+  }
+  return (protocol || 'http').toUpperCase()
+}
+
+function proxyTestTagType(status: string) {
+  if (status === 'success') {
+    return 'success'
+  }
+  if (status === 'error') {
+    return 'danger'
+  }
+  return 'info'
+}
+
+function proxyGroupOptionLabel(group: ProxyGroup) {
+  const available = group.availableNodeCount > 0 ? `${group.availableNodeCount}/${group.nodeCount} 可用` : `${group.nodeCount} 节点`
+  return `${group.name} · ${proxyGroupTypeLabel(group.type)} · ${available}`
+}
+
 function taskStatusClass(status: string) {
   if (status === 'waiting_payment' || status === 'succeeded') {
     return 'ready'
@@ -1917,6 +2191,186 @@ onUnmounted(() => {
         </section>
       </section>
 
+      <section v-if="activeSection === 'proxies'" class="content-grid">
+        <div class="stack-column">
+          <el-form class="panel form-panel proxy-form-panel" label-position="top" @submit.prevent="saveProxyGroup">
+            <div class="panel-heading">
+              <h3>{{ editingProxyGroupId ? '编辑代理组' : '新增代理组' }}</h3>
+              <el-button :icon="Close" text @click="resetProxyGroupForm">清空</el-button>
+            </div>
+            <el-form-item required label="代理组名称">
+              <el-input v-model="proxyGroupForm.name" placeholder="例如：代理组1" clearable />
+            </el-form-item>
+            <el-form-item required label="代理组类型">
+              <el-radio-group v-model="proxyGroupForm.type">
+                <el-radio-button label="static">普通代理组</el-radio-button>
+                <el-radio-button label="api">API 代理组</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <template v-if="proxyGroupForm.type === 'api'">
+              <el-form-item required label="接口类型">
+                <el-select v-model="proxyGroupForm.apiProvider">
+                  <el-option value="kuaidaili_dps" label="快代理私密代理" />
+                </el-select>
+              </el-form-item>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="12">
+                  <el-form-item required label="SecretId">
+                    <el-input v-model="proxyGroupForm.apiConfig.secretId" placeholder="快代理 SecretId" clearable />
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="12">
+                  <el-form-item required label="SecretKey">
+                    <el-input v-model="proxyGroupForm.apiConfig.secretKey" type="password" show-password placeholder="快代理 SecretKey" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="8">
+                  <el-form-item label="鉴权方式">
+                    <el-select v-model="proxyGroupForm.apiConfig.signType">
+                      <el-option value="hmacsha1" label="HMAC-SHA1" />
+                      <el-option value="token" label="Token" />
+                      <el-option value="simple" label="SecretKey" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="8">
+                  <el-form-item label="提取数量">
+                    <el-input v-model="proxyGroupForm.apiConfig.num" placeholder="5" clearable />
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="8">
+                  <el-form-item label="提前提取（分钟）">
+                    <el-input v-model="proxyGroupForm.apiConfig.pullBeforeMinutes" placeholder="5" clearable />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="代理协议">
+                    <el-select v-model="proxyGroupForm.apiConfig.proxyProtocol">
+                      <el-option value="http" label="HTTP" />
+                      <el-option value="https" label="HTTPS" />
+                      <el-option value="socks5" label="SOCKS5" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="地区参数">
+                    <el-input v-model="proxyGroupForm.apiConfig.area" placeholder="可选，例如：北京,上海" clearable />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </template>
+            <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveProxyGroup" :loading="loading">
+              保存代理组
+            </el-button>
+          </el-form>
+
+          <el-form class="panel form-panel proxy-form-panel" label-position="top" @submit.prevent="saveProxyNode">
+            <div class="panel-heading">
+              <h3>{{ editingProxyNodeId ? '编辑代理节点' : '新增代理节点' }}</h3>
+              <el-button :icon="Close" text @click="resetProxyNodeForm">清空</el-button>
+            </div>
+            <el-form-item required label="所属代理组">
+              <el-select v-model="selectedProxyGroupId" placeholder="选择代理组" @change="handleProxyGroupSelection">
+                <el-option v-for="group in proxyGroups" :key="group.id" :value="group.id" :label="group.name" />
+              </el-select>
+            </el-form-item>
+            <el-alert v-if="proxyNodeFormLocked" type="info" :closable="false" title="API 代理组请使用拉取检测生成节点。" class="form-tip-alert" />
+            <template v-else>
+              <el-form-item label="节点名称">
+                <el-input v-model="proxyNodeForm.name" placeholder="默认使用 host:port" clearable />
+              </el-form-item>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="8">
+                  <el-form-item required label="协议">
+                    <el-select v-model="proxyNodeForm.protocol">
+                      <el-option value="http" label="HTTP" />
+                      <el-option value="https" label="HTTPS" />
+                      <el-option value="socks5" label="SOCKS5" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="10">
+                  <el-form-item required label="地址">
+                    <el-input v-model="proxyNodeForm.host" placeholder="127.0.0.1" clearable />
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="6">
+                  <el-form-item required label="端口">
+                    <el-input-number v-model="proxyNodeForm.port" :min="1" :max="65535" controls-position="right" class="full-input" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="账号">
+                    <el-input v-model="proxyNodeForm.username" clearable />
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="密码">
+                    <el-input v-model="proxyNodeForm.password" type="password" show-password />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveProxyNode" :loading="loading">
+                保存代理节点
+              </el-button>
+            </template>
+          </el-form>
+        </div>
+
+        <section class="panel list-panel">
+          <div class="panel-heading">
+            <h3>代理组</h3>
+            <span class="muted">{{ proxyGroups.length }} 个代理组</span>
+          </div>
+          <article v-for="group in proxyGroups" :key="group.id" class="item-card">
+            <div>
+              <h4>{{ group.name }}</h4>
+              <p>{{ proxyGroupTypeLabel(group.type) }} · {{ group.availableNodeCount }}/{{ group.nodeCount }} 可用</p>
+              <small v-if="group.lastPullStatus">最近拉取：{{ group.lastPullMessage || '-' }} {{ group.lastPulledAt ? `· ${group.lastPulledAt}` : '' }}</small>
+              <small v-if="group.lastTestStatus">最近检测：{{ group.lastTestMessage || '-' }} {{ group.lastTestedAt ? `· ${group.lastTestedAt}` : '' }}</small>
+            </div>
+            <div class="actions">
+              <el-tag :type="group.inUse ? 'warning' : 'info'">{{ group.inUse ? '运行中占用' : '可编辑' }}</el-tag>
+              <el-tag :type="proxyTestTagType(group.lastTestStatus)">{{ group.lastTestStatus || '未检测' }}</el-tag>
+              <el-button :icon="View" @click="selectProxyGroup(group)">节点</el-button>
+              <el-button :icon="Check" :disabled="group.inUse || group.nodeCount === 0" @click="testProxyGroup(group)">检测</el-button>
+              <el-button v-if="group.type === 'api'" :icon="Refresh" :disabled="group.inUse" @click="pullAndTestProxyGroup(group)">拉取检测</el-button>
+              <el-button :icon="Edit" :disabled="group.inUse" @click="editProxyGroup(group)">编辑</el-button>
+              <el-button type="danger" plain :icon="Delete" :disabled="group.inUse" @click="confirmDeleteProxyGroup(group)">删除</el-button>
+            </div>
+          </article>
+          <el-empty v-if="proxyGroups.length === 0" description="暂无代理组" />
+
+          <div class="panel-heading node-heading">
+            <h3>代理节点</h3>
+            <span class="muted">{{ selectedProxyGroupId ? `${proxyNodes.length} 个节点` : '未选择代理组' }}</span>
+          </div>
+          <article v-for="node in proxyNodes" :key="node.id" class="item-card">
+            <div>
+              <h4>{{ node.name || `${node.host}:${node.port}` }}</h4>
+              <p>{{ proxyProtocolLabel(node.protocol) }} · {{ node.host }}:{{ node.port }} · {{ node.source === 'api' ? 'API 拉取' : '手动添加' }}</p>
+              <small v-if="node.username">账号：{{ node.username }}</small>
+              <small v-if="node.lastTestStatus">最近检测：{{ node.lastTestMessage || '-' }} {{ node.lastTestedAt ? `· ${node.lastTestedAt}` : '' }}</small>
+              <small v-if="node.lastTestLatencyMillis || node.lastTestIpLocation">
+                延时：{{ node.lastTestLatencyMillis ? `${node.lastTestLatencyMillis}ms` : '-' }} · IP归属地：{{ node.lastTestIpLocation || '-' }}
+              </small>
+            </div>
+            <div class="actions">
+              <el-tag :type="proxyTestTagType(node.lastTestStatus)">{{ node.lastTestStatus || '未检测' }}</el-tag>
+              <el-button :icon="Edit" @click="editProxyNode(node)">编辑</el-button>
+              <el-button type="danger" plain :icon="Delete" @click="deleteProxyNode(node)">删除</el-button>
+            </div>
+          </article>
+          <el-empty v-if="selectedProxyGroupId && proxyNodes.length === 0" description="该代理组暂无节点" />
+        </section>
+      </section>
+
       <section v-if="activeSection === 'taskConfig'" class="content-grid">
         <el-form class="panel form-panel" label-position="top" @submit.prevent="saveTask">
           <div class="panel-heading">
@@ -2128,6 +2582,17 @@ onUnmounted(() => {
               </el-button>
             </div>
           </el-form-item>
+          <el-form-item v-if="hasRushTaskSection" label="代理组">
+            <el-select v-model="taskForm.proxyGroupId" placeholder="不使用代理" filterable clearable>
+              <el-option :value="0" label="不使用代理" />
+              <el-option
+                v-for="group in selectableProxyGroups"
+                :key="group.id"
+                :value="group.id"
+                :label="proxyGroupOptionLabel(group)"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item required label="实名购票人">
             <div class="buyer-check-list" :class="{ disabled: ticketBuyers.length === 0 }">
               <el-checkbox-group v-model="selectedBuyerIndexes" @change="updateSelectedBuyers">
@@ -2242,6 +2707,7 @@ onUnmounted(() => {
               <div>
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
+                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>
@@ -2266,6 +2732,7 @@ onUnmounted(() => {
               <div>
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
+                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>
@@ -2294,6 +2761,7 @@ onUnmounted(() => {
               <template #default="{ row }">
                 <strong>{{ row.name }}</strong>
                 <small>模式：{{ taskModeLabel(row) }}</small>
+                <small v-if="row.proxyGroupName">代理组：{{ row.proxyGroupName }}</small>
                 <small>{{ taskBuyerSummary(row) }}</small>
               </template>
             </el-table-column>
@@ -2340,6 +2808,7 @@ onUnmounted(() => {
               <div class="mobile-task-main">
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
+                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ timeSyncSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,6 +234,109 @@ func TestNotificationAPIs(t *testing.T) {
 	router.ServeHTTP(resp, req)
 	if resp.Code != http.StatusNoContent {
 		t.Fatalf("delete notification status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestProxyAPIsAndBusyGuard(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+
+	body := bytes.NewBufferString(`{"name":"代理组","type":"static","apiProvider":"","apiConfig":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/proxy-groups", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create proxy group status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var group model.ProxyGroup
+	if err := json.Unmarshal(resp.Body.Bytes(), &group); err != nil {
+		t.Fatalf("decode proxy group: %v", err)
+	}
+	if group.ID == 0 || group.Type != model.ProxyGroupTypeStatic {
+		t.Fatalf("unexpected proxy group: %#v", group)
+	}
+
+	body = bytes.NewBufferString(`{"name":"节点1","protocol":"http","host":"127.0.0.1","port":8080,"username":"u","password":"p"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/proxy-groups/1/nodes", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create proxy node status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var node model.ProxyNode
+	if err := json.Unmarshal(resp.Body.Bytes(), &node); err != nil {
+		t.Fatalf("decode proxy node: %v", err)
+	}
+	if node.ID == 0 || node.Username != "u" {
+		t.Fatalf("unexpected proxy node: %#v", node)
+	}
+
+	body = bytes.NewBufferString(`{"name":"API代理组","type":"api","apiProvider":"kuaidaili_dps","apiConfig":{"secretId":"sid","secretKey":"skey"}}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/proxy-groups", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var apiGroup model.ProxyGroup
+	if err := json.Unmarshal(resp.Body.Bytes(), &apiGroup); err != nil {
+		t.Fatalf("decode api proxy group: %v", err)
+	}
+	body = bytes.NewBufferString(`{"name":"节点2","protocol":"http","host":"127.0.0.1","port":8081}`)
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/nodes", apiGroup.ID), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "不支持手动添加") {
+		t.Fatalf("create api proxy node status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	task, err := taskStore.CreateTask(context.Background(), model.TaskInput{
+		Name:               "代理占用任务",
+		AccountID:          1,
+		ProxyGroupID:       group.ID,
+		ProjectID:          1001701,
+		ScreenID:           2001,
+		SKUID:              3001,
+		TicketDisplay:      "晚场 - VIP",
+		SaleStart:          "2026-06-13 20:00:00",
+		BuyerInfo:          []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:              "张三",
+		Tel:                "13800000000",
+		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+		PollIntervalMillis: 1000,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, _, err := taskStore.SetTaskRuntime(context.Background(), task.ID, model.TaskRuntimeUpdate{
+		Status:      "running",
+		LastMessage: "运行中",
+	}, "info"); err != nil {
+		t.Fatalf("SetTaskRuntime: %v", err)
+	}
+
+	body = bytes.NewBufferString(`{"name":"代理组2","type":"static","apiProvider":"","apiConfig":{}}`)
+	req = httptest.NewRequest(http.MethodPut, "/api/proxy-groups/1", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "无法编辑") {
+		t.Fatalf("busy update status = %d, body = %s", resp.Code, resp.Body.String())
 	}
 }
 

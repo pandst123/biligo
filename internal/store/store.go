@@ -85,10 +85,44 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS proxy_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT 'static',
+			api_provider TEXT NOT NULL DEFAULT '',
+			api_config TEXT NOT NULL DEFAULT '{}',
+			last_pull_status TEXT NOT NULL DEFAULT '',
+			last_pull_message TEXT NOT NULL DEFAULT '',
+			last_pulled_at TEXT NOT NULL DEFAULT '',
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_message TEXT NOT NULL DEFAULT '',
+			last_tested_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS proxy_nodes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			protocol TEXT NOT NULL DEFAULT 'http',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 0,
+			username TEXT NOT NULL DEFAULT '',
+			password TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'manual',
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_message TEXT NOT NULL DEFAULT '',
+			last_test_latency_ms INTEGER NOT NULL DEFAULT 0,
+			last_test_ip_location TEXT NOT NULL DEFAULT '',
+			last_tested_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			account_id INTEGER NOT NULL DEFAULT 0,
+			proxy_group_id INTEGER NOT NULL DEFAULT 0,
 			project_id INTEGER NOT NULL DEFAULT 0,
 			project_name TEXT NOT NULL DEFAULT '',
 			screen_id INTEGER NOT NULL DEFAULT 0,
@@ -141,6 +175,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
+	}
+	if err := s.ensureColumn(ctx, "tasks", "proxy_group_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proxy_nodes", "last_test_latency_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proxy_nodes", "last_test_ip_location", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -461,10 +504,254 @@ func (s *Store) SetNotificationTestResult(ctx context.Context, id int64, status 
 	return s.GetNotification(ctx, id)
 }
 
+func (s *Store) ListProxyGroups(ctx context.Context) ([]model.ProxyGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			pg.id, pg.name, pg.type, pg.api_provider, pg.api_config,
+			pg.last_pull_status, pg.last_pull_message, pg.last_pulled_at,
+			pg.last_test_status, pg.last_test_message, pg.last_tested_at,
+			COUNT(DISTINCT pn.id),
+			COUNT(DISTINCT CASE WHEN pn.last_test_status = 'success' THEN pn.id END),
+			COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
+			pg.created_at, pg.updated_at
+		FROM proxy_groups pg
+		LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
+		LEFT JOIN tasks t ON t.proxy_group_id = pg.id
+		GROUP BY pg.id
+		ORDER BY pg.updated_at DESC, pg.id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	groups := make([]model.ProxyGroup, 0)
+	for rows.Next() {
+		var group model.ProxyGroup
+		if err := scanProxyGroup(rows, &group); err != nil {
+			return nil, err
+		}
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
+}
+
+func (s *Store) GetProxyGroup(ctx context.Context, id int64) (model.ProxyGroup, error) {
+	var group model.ProxyGroup
+	row := s.db.QueryRowContext(ctx, `
+		SELECT
+			pg.id, pg.name, pg.type, pg.api_provider, pg.api_config,
+			pg.last_pull_status, pg.last_pull_message, pg.last_pulled_at,
+			pg.last_test_status, pg.last_test_message, pg.last_tested_at,
+			COUNT(DISTINCT pn.id),
+			COUNT(DISTINCT CASE WHEN pn.last_test_status = 'success' THEN pn.id END),
+			COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
+			pg.created_at, pg.updated_at
+		FROM proxy_groups pg
+		LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
+		LEFT JOIN tasks t ON t.proxy_group_id = pg.id
+		WHERE pg.id = ?
+		GROUP BY pg.id
+	`, id)
+	err := scanProxyGroup(row, &group)
+	return group, err
+}
+
+func (s *Store) CreateProxyGroup(ctx context.Context, input model.ProxyGroupInput) (model.ProxyGroup, error) {
+	now := nowText()
+	input = normalizeProxyGroupInput(input)
+	config, err := marshalJSON(input.APIConfig, "{}")
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO proxy_groups (name, type, api_provider, api_config, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, strings.TrimSpace(input.Name), input.Type, input.APIProvider, config, now, now)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	return s.GetProxyGroup(ctx, id)
+}
+
+func (s *Store) UpdateProxyGroup(ctx context.Context, id int64, input model.ProxyGroupInput) (model.ProxyGroup, error) {
+	now := nowText()
+	input = normalizeProxyGroupInput(input)
+	config, err := marshalJSON(input.APIConfig, "{}")
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE proxy_groups
+		SET name = ?, type = ?, api_provider = ?, api_config = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(input.Name), input.Type, input.APIProvider, config, now, id)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	return s.GetProxyGroup(ctx, id)
+}
+
+func (s *Store) DeleteProxyGroup(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE group_id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM proxy_groups WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ProxyGroupInUse(ctx context.Context, id int64) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM tasks
+		WHERE proxy_group_id = ? AND status IN ('waiting_start', 'running')
+	`, id).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) ListProxyNodes(ctx context.Context, groupID int64) ([]model.ProxyNode, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, group_id, name, protocol, host, port, username, password, source,
+			last_test_status, last_test_message, last_test_latency_ms, last_test_ip_location,
+			last_tested_at, created_at, updated_at
+		FROM proxy_nodes
+		WHERE group_id = ?
+		ORDER BY id ASC
+	`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	nodes := make([]model.ProxyNode, 0)
+	for rows.Next() {
+		var node model.ProxyNode
+		if err := scanProxyNode(rows, &node); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+func (s *Store) GetProxyNode(ctx context.Context, id int64) (model.ProxyNode, error) {
+	var node model.ProxyNode
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, group_id, name, protocol, host, port, username, password, source,
+			last_test_status, last_test_message, last_test_latency_ms, last_test_ip_location,
+			last_tested_at, created_at, updated_at
+		FROM proxy_nodes
+		WHERE id = ?
+	`, id)
+	err := scanProxyNode(row, &node)
+	return node, err
+}
+
+func (s *Store) CreateProxyNode(ctx context.Context, groupID int64, input model.ProxyNodeInput) (model.ProxyNode, error) {
+	return s.createProxyNodeWithSource(ctx, groupID, input, model.ProxyNodeSourceManual)
+}
+
+func (s *Store) createProxyNodeWithSource(ctx context.Context, groupID int64, input model.ProxyNodeInput, source string) (model.ProxyNode, error) {
+	now := nowText()
+	input = normalizeProxyNodeInput(input)
+	source = model.NormalizeProxyNodeSource(source)
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO proxy_nodes (group_id, name, protocol, host, port, username, password, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, groupID, strings.TrimSpace(input.Name), input.Protocol, strings.TrimSpace(input.Host), input.Port, strings.TrimSpace(input.Username), strings.TrimSpace(input.Password), source, now, now)
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	return s.GetProxyNode(ctx, id)
+}
+
+func (s *Store) UpdateProxyNode(ctx context.Context, id int64, input model.ProxyNodeInput) (model.ProxyNode, error) {
+	now := nowText()
+	input = normalizeProxyNodeInput(input)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_nodes
+		SET name = ?, protocol = ?, host = ?, port = ?, username = ?, password = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(input.Name), input.Protocol, strings.TrimSpace(input.Host), input.Port, strings.TrimSpace(input.Username), strings.TrimSpace(input.Password), now, id)
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	return s.GetProxyNode(ctx, id)
+}
+
+func (s *Store) DeleteProxyNode(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ReplaceAPIProxyNodes(ctx context.Context, groupID int64, nodes []model.ProxyNodeInput) ([]model.ProxyNode, error) {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE group_id = ? AND source = ?`, groupID, model.ProxyNodeSourceAPI); err != nil {
+		return nil, err
+	}
+	created := make([]model.ProxyNode, 0, len(nodes))
+	for _, input := range nodes {
+		node, err := s.createProxyNodeWithSource(ctx, groupID, input, model.ProxyNodeSourceAPI)
+		if err != nil {
+			return nil, err
+		}
+		created = append(created, node)
+	}
+	return created, nil
+}
+
+func (s *Store) SetProxyNodeTestResult(ctx context.Context, id int64, status string, message string, latencyMillis int64, ipLocation string) (model.ProxyNode, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_nodes
+		SET last_test_status = ?, last_test_message = ?, last_test_latency_ms = ?, last_test_ip_location = ?, last_tested_at = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(message), latencyMillis, strings.TrimSpace(ipLocation), now, now, id)
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	return s.GetProxyNode(ctx, id)
+}
+
+func (s *Store) SetProxyGroupPullResult(ctx context.Context, id int64, status string, message string) (model.ProxyGroup, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_groups
+		SET last_pull_status = ?, last_pull_message = ?, last_pulled_at = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(message), now, now, id)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	return s.GetProxyGroup(ctx, id)
+}
+
+func (s *Store) SetProxyGroupTestResult(ctx context.Context, id int64, status string, message string) (model.ProxyGroup, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_groups
+		SET last_test_status = ?, last_test_message = ?, last_tested_at = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(message), now, now, id)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	return s.GetProxyGroup(ctx, id)
+}
+
 func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			t.id, t.name, t.account_id, COALESCE(a.name, ''),
+			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''),
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
 				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
@@ -476,6 +763,7 @@ func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
+		LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
 		ORDER BY t.updated_at DESC, t.id DESC
 	`)
 	if err != nil {
@@ -512,7 +800,7 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tasks (
-			name, account_id, project_id, project_name, screen_id, sku_id,
+			name, account_id, proxy_group_id, project_id, project_name, screen_id, sku_id,
 				session_name, ticket_level, ticket_display, ticket_price,
 				sale_start, sale_status, link_id, is_hot_project,
 				task_mode, duration_mode, selected_tickets, rush_duration_seconds,
@@ -521,8 +809,8 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 			quantity, start_at, end_at, poll_interval_ms,
 			status, last_message, created_at, updated_at
 		)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-		`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
+		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -541,7 +829,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 	var task model.Task
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
-			t.id, t.name, t.account_id, COALESCE(a.name, ''),
+			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''),
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
 				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
@@ -553,6 +841,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
+		LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
 		WHERE t.id = ?
 	`, id)
 	err := scanTask(row, &task)
@@ -576,7 +865,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE tasks
-		SET name = ?, account_id = ?, project_id = ?, project_name = ?, screen_id = ?, sku_id = ?,
+		SET name = ?, account_id = ?, proxy_group_id = ?, project_id = ?, project_name = ?, screen_id = ?, sku_id = ?,
 			session_name = ?, ticket_level = ?, ticket_display = ?, ticket_price = ?,
 			sale_start = ?, sale_status = ?, link_id = ?, is_hot_project = ?,
 			task_mode = ?, duration_mode = ?, selected_tickets = ?, rush_duration_seconds = ?,
@@ -584,7 +873,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 			time_sync_strategy = ?,
 			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -842,6 +1131,34 @@ func (s *Store) ListTaskLogs(ctx context.Context, taskID int64) ([]model.TaskLog
 	return logs, rows.Err()
 }
 
+func (s *Store) ensureColumn(ctx context.Context, table string, column string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition))
+	return err
+}
+
 func nowText() string {
 	return time.Now().Format(time.RFC3339)
 }
@@ -896,6 +1213,67 @@ func scanNotification(scanner taskScanner, notification *model.Notification) err
 	return nil
 }
 
+func scanProxyGroup(scanner taskScanner, group *model.ProxyGroup) error {
+	var config string
+	var inUse int
+	if err := scanner.Scan(
+		&group.ID,
+		&group.Name,
+		&group.Type,
+		&group.APIProvider,
+		&config,
+		&group.LastPullStatus,
+		&group.LastPullMessage,
+		&group.LastPulledAt,
+		&group.LastTestStatus,
+		&group.LastTestMessage,
+		&group.LastTestedAt,
+		&group.NodeCount,
+		&group.AvailableNodeCount,
+		&inUse,
+		&group.CreatedAt,
+		&group.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	group.Type = model.NormalizeProxyGroupType(group.Type)
+	group.APIProvider = model.NormalizeProxyProvider(group.APIProvider)
+	group.InUse = inUse != 0
+	if err := unmarshalJSON(config, &group.APIConfig); err != nil {
+		return err
+	}
+	if group.APIConfig == nil {
+		group.APIConfig = map[string]string{}
+	}
+	return nil
+}
+
+func scanProxyNode(scanner taskScanner, node *model.ProxyNode) error {
+	if err := scanner.Scan(
+		&node.ID,
+		&node.GroupID,
+		&node.Name,
+		&node.Protocol,
+		&node.Host,
+		&node.Port,
+		&node.Username,
+		&node.Password,
+		&node.Source,
+		&node.LastTestStatus,
+		&node.LastTestMessage,
+		&node.LastTestLatencyMillis,
+		&node.LastTestIPLocation,
+		&node.LastTestedAt,
+		&node.CreatedAt,
+		&node.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	node.Protocol = model.NormalizeProxyProtocol(node.Protocol)
+	node.Source = model.NormalizeProxyNodeSource(node.Source)
+	return nil
+}
+
 func scanTask(scanner taskScanner, task *model.Task) error {
 	var isHotProject int
 	var buyerInfo string
@@ -906,6 +1284,8 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&task.Name,
 		&task.AccountID,
 		&task.AccountName,
+		&task.ProxyGroupID,
+		&task.ProxyGroupName,
 		&task.ProjectID,
 		&task.ProjectName,
 		&task.ScreenID,
@@ -980,6 +1360,9 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	input.TimeSyncStrategy = model.NormalizeTimeSyncStrategy(input.TimeSyncStrategy)
 	input.TaskMode = model.NormalizeTaskMode(input.TaskMode)
 	input.DurationMode = model.NormalizeDurationMode(input.DurationMode)
+	if input.TaskMode == model.TaskModeRestock {
+		input.ProxyGroupID = 0
+	}
 	if input.RushDurationSeconds <= 0 {
 		input.RushDurationSeconds = model.DefaultRushDurationSeconds
 	}
@@ -1015,6 +1398,37 @@ func normalizeNotificationInput(input model.NotificationInput) model.Notificatio
 		normalizedConfig[key] = strings.TrimSpace(value)
 	}
 	input.Config = normalizedConfig
+	return input
+}
+
+func normalizeProxyGroupInput(input model.ProxyGroupInput) model.ProxyGroupInput {
+	input.Type = model.NormalizeProxyGroupType(input.Type)
+	if input.Type == model.ProxyGroupTypeAPI {
+		input.APIProvider = model.NormalizeProxyProvider(input.APIProvider)
+	} else {
+		input.APIProvider = ""
+		input.APIConfig = map[string]string{}
+	}
+	if input.APIConfig == nil {
+		input.APIConfig = map[string]string{}
+	}
+	normalizedConfig := make(map[string]string, len(input.APIConfig))
+	for key, value := range input.APIConfig {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		normalizedConfig[key] = strings.TrimSpace(value)
+	}
+	input.APIConfig = normalizedConfig
+	return input
+}
+
+func normalizeProxyNodeInput(input model.ProxyNodeInput) model.ProxyNodeInput {
+	input.Protocol = model.NormalizeProxyProtocol(input.Protocol)
+	input.Host = strings.TrimSpace(input.Host)
+	input.Username = strings.TrimSpace(input.Username)
+	input.Password = strings.TrimSpace(input.Password)
 	return input
 }
 

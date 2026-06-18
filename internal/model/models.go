@@ -9,6 +9,18 @@ const (
 	NotificationProviderPushPlus = "pushplus"
 	NotificationProviderBark     = "bark"
 
+	ProxyGroupTypeStatic = "static"
+	ProxyGroupTypeAPI    = "api"
+
+	ProxyProviderKuaidailiDPS = "kuaidaili_dps"
+
+	ProxyProtocolHTTP   = "http"
+	ProxyProtocolHTTPS  = "https"
+	ProxyProtocolSOCKS5 = "socks5"
+
+	ProxyNodeSourceManual = "manual"
+	ProxyNodeSourceAPI    = "api"
+
 	TaskModeRush    = "rush"
 	TaskModeRestock = "restock"
 	TaskModeHybrid  = "rush_restock"
@@ -131,6 +143,60 @@ type NotificationInput struct {
 	Config   map[string]string `json:"config"`
 }
 
+type ProxyGroup struct {
+	ID                 int64             `json:"id"`
+	Name               string            `json:"name"`
+	Type               string            `json:"type"`
+	APIProvider        string            `json:"apiProvider"`
+	APIConfig          map[string]string `json:"apiConfig"`
+	LastPullStatus     string            `json:"lastPullStatus"`
+	LastPullMessage    string            `json:"lastPullMessage"`
+	LastPulledAt       string            `json:"lastPulledAt"`
+	LastTestStatus     string            `json:"lastTestStatus"`
+	LastTestMessage    string            `json:"lastTestMessage"`
+	LastTestedAt       string            `json:"lastTestedAt"`
+	NodeCount          int               `json:"nodeCount"`
+	AvailableNodeCount int               `json:"availableNodeCount"`
+	InUse              bool              `json:"inUse"`
+	CreatedAt          string            `json:"createdAt"`
+	UpdatedAt          string            `json:"updatedAt"`
+}
+
+type ProxyGroupInput struct {
+	Name        string            `json:"name"`
+	Type        string            `json:"type"`
+	APIProvider string            `json:"apiProvider"`
+	APIConfig   map[string]string `json:"apiConfig"`
+}
+
+type ProxyNode struct {
+	ID                    int64  `json:"id"`
+	GroupID               int64  `json:"groupId"`
+	Name                  string `json:"name"`
+	Protocol              string `json:"protocol"`
+	Host                  string `json:"host"`
+	Port                  int    `json:"port"`
+	Username              string `json:"username"`
+	Password              string `json:"password"`
+	Source                string `json:"source"`
+	LastTestStatus        string `json:"lastTestStatus"`
+	LastTestMessage       string `json:"lastTestMessage"`
+	LastTestLatencyMillis int64  `json:"lastTestLatencyMillis"`
+	LastTestIPLocation    string `json:"lastTestIpLocation"`
+	LastTestedAt          string `json:"lastTestedAt"`
+	CreatedAt             string `json:"createdAt"`
+	UpdatedAt             string `json:"updatedAt"`
+}
+
+type ProxyNodeInput struct {
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type TicketProjectHistory struct {
 	ProjectID    int64  `json:"projectId"`
 	ProjectName  string `json:"projectName"`
@@ -219,6 +285,8 @@ type Task struct {
 	Name                  string         `json:"name"`
 	AccountID             int64          `json:"accountId"`
 	AccountName           string         `json:"accountName"`
+	ProxyGroupID          int64          `json:"proxyGroupId"`
+	ProxyGroupName        string         `json:"proxyGroupName"`
 	ProjectID             int64          `json:"projectId"`
 	ProjectName           string         `json:"projectName"`
 	ScreenID              int64          `json:"screenId"`
@@ -262,6 +330,7 @@ type Task struct {
 type TaskInput struct {
 	Name                string         `json:"name"`
 	AccountID           int64          `json:"accountId"`
+	ProxyGroupID        int64          `json:"proxyGroupId"`
 	ProjectID           int64          `json:"projectId"`
 	ProjectName         string         `json:"projectName"`
 	ScreenID            int64          `json:"screenId"`
@@ -331,6 +400,44 @@ func NormalizeNotificationProvider(provider string) string {
 		return NotificationProviderBark
 	default:
 		return ""
+	}
+}
+
+func NormalizeProxyGroupType(groupType string) string {
+	switch strings.ToLower(strings.TrimSpace(groupType)) {
+	case ProxyGroupTypeAPI:
+		return ProxyGroupTypeAPI
+	default:
+		return ProxyGroupTypeStatic
+	}
+}
+
+func NormalizeProxyProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case ProxyProviderKuaidailiDPS:
+		return ProxyProviderKuaidailiDPS
+	default:
+		return ""
+	}
+}
+
+func NormalizeProxyProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case ProxyProtocolHTTPS:
+		return ProxyProtocolHTTPS
+	case ProxyProtocolSOCKS5:
+		return ProxyProtocolSOCKS5
+	default:
+		return ProxyProtocolHTTP
+	}
+}
+
+func NormalizeProxyNodeSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case ProxyNodeSourceAPI:
+		return ProxyNodeSourceAPI
+	default:
+		return ProxyNodeSourceManual
 	}
 }
 

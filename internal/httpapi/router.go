@@ -22,6 +22,7 @@ import (
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/notify"
 	"github.com/fdcs99/biligo/internal/panelauth"
+	proxynet "github.com/fdcs99/biligo/internal/proxy"
 	"github.com/fdcs99/biligo/internal/runner"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/gin-gonic/gin"
@@ -132,6 +133,17 @@ func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logg
 			protected.POST("/notifications/:id/test", handler.testNotification)
 			protected.POST("/notifications/:id/enable", handler.enableNotification)
 			protected.POST("/notifications/:id/disable", handler.disableNotification)
+
+			protected.GET("/proxy-groups", handler.listProxyGroups)
+			protected.POST("/proxy-groups", handler.createProxyGroup)
+			protected.PUT("/proxy-groups/:id", handler.updateProxyGroup)
+			protected.DELETE("/proxy-groups/:id", handler.deleteProxyGroup)
+			protected.GET("/proxy-groups/:id/nodes", handler.listProxyNodes)
+			protected.POST("/proxy-groups/:id/nodes", handler.createProxyNode)
+			protected.PUT("/proxy-nodes/:id", handler.updateProxyNode)
+			protected.DELETE("/proxy-nodes/:id", handler.deleteProxyNode)
+			protected.POST("/proxy-groups/:id/test", handler.testProxyGroup)
+			protected.POST("/proxy-groups/:id/pull-test", handler.pullAndTestProxyGroup)
 
 			protected.GET("/logs", handler.listLogs)
 		}
@@ -745,6 +757,258 @@ func (h *Handler) disableNotification(c *gin.Context) {
 	c.JSON(http.StatusOK, notification)
 }
 
+func (h *Handler) listProxyGroups(c *gin.Context) {
+	groups, err := h.store.ListProxyGroups(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, groups)
+}
+
+func (h *Handler) createProxyGroup(c *gin.Context) {
+	var input model.ProxyGroupInput
+	if !bindJSON(c, &input) || !validateProxyGroupInput(c, input) {
+		return
+	}
+	group, err := h.store.CreateProxyGroup(c.Request.Context(), input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, group)
+}
+
+func (h *Handler) updateProxyGroup(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if !h.requireProxyGroupEditable(c, id) {
+		return
+	}
+	var input model.ProxyGroupInput
+	if !bindJSON(c, &input) || !validateProxyGroupInput(c, input) {
+		return
+	}
+	group, err := h.store.UpdateProxyGroup(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, group)
+}
+
+func (h *Handler) deleteProxyGroup(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if !h.requireProxyGroupEditable(c, id) {
+		return
+	}
+	if err := h.store.DeleteProxyGroup(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) listProxyNodes(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	nodes, err := h.store.ListProxyNodes(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, nodes)
+}
+
+func (h *Handler) createProxyNode(c *gin.Context) {
+	groupID, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if !h.requireProxyGroupEditable(c, groupID) {
+		return
+	}
+	group, err := h.store.GetProxyGroup(c.Request.Context(), groupID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if group.Type == model.ProxyGroupTypeAPI {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API 代理组不支持手动添加代理节点，请使用拉取检测"})
+		return
+	}
+	var input model.ProxyNodeInput
+	if !bindJSON(c, &input) || !validateProxyNodeInput(c, input) {
+		return
+	}
+	node, err := h.store.CreateProxyNode(c.Request.Context(), groupID, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, node)
+}
+
+func (h *Handler) updateProxyNode(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	node, err := h.store.GetProxyNode(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if !h.requireProxyGroupEditable(c, node.GroupID) {
+		return
+	}
+	var input model.ProxyNodeInput
+	if !bindJSON(c, &input) || !validateProxyNodeInput(c, input) {
+		return
+	}
+	updated, err := h.store.UpdateProxyNode(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *Handler) deleteProxyNode(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	node, err := h.store.GetProxyNode(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if !h.requireProxyGroupEditable(c, node.GroupID) {
+		return
+	}
+	if err := h.store.DeleteProxyNode(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) testProxyGroup(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if !h.requireProxyGroupEditable(c, id) {
+		return
+	}
+	group, err := h.testProxyGroupNodes(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, group)
+}
+
+func (h *Handler) pullAndTestProxyGroup(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if !h.requireProxyGroupEditable(c, id) {
+		return
+	}
+	group, err := h.store.GetProxyGroup(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if group.Type != model.ProxyGroupTypeAPI || group.APIProvider != model.ProxyProviderKuaidailiDPS {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅快代理 API 代理组支持拉取检测"})
+		return
+	}
+	pullCtx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	nodes, err := proxynet.PullKuaidailiDPS(pullCtx, group)
+	cancel()
+	if err != nil {
+		_, _ = h.store.SetProxyGroupPullResult(c.Request.Context(), id, "error", err.Error())
+		respondError(c, err)
+		return
+	}
+	if _, err := h.store.ReplaceAPIProxyNodes(c.Request.Context(), id, nodes); err != nil {
+		respondError(c, err)
+		return
+	}
+	if _, err := h.store.SetProxyGroupPullResult(c.Request.Context(), id, "success", fmt.Sprintf("已拉取 %d 个代理节点。", len(nodes))); err != nil {
+		respondError(c, err)
+		return
+	}
+	tested, err := h.testProxyGroupNodes(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, tested)
+}
+
+func (h *Handler) testProxyGroupNodes(ctx context.Context, groupID int64) (model.ProxyGroup, error) {
+	nodes, err := h.store.ListProxyNodes(ctx, groupID)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	successCount := 0
+	totalLatencyMillis := int64(0)
+	for _, node := range nodes {
+		testCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		result, err := proxynet.TestNode(testCtx, node)
+		cancel()
+		status := "success"
+		message := "代理检测通过。"
+		if err != nil {
+			status = "error"
+			message = err.Error()
+		} else {
+			successCount++
+			totalLatencyMillis += result.LatencyMillis
+			if result.IPLocationErr != "" {
+				message = fmt.Sprintf("代理检测通过，IP 归属地获取失败：%s", result.IPLocationErr)
+			}
+		}
+		if _, updateErr := h.store.SetProxyNodeTestResult(ctx, node.ID, status, message, result.LatencyMillis, result.IPLocation); updateErr != nil {
+			return model.ProxyGroup{}, updateErr
+		}
+	}
+	status := "success"
+	if successCount == 0 {
+		status = "error"
+	}
+	message := fmt.Sprintf("检测完成：%d/%d 个节点可用。", successCount, len(nodes))
+	if successCount > 0 {
+		message = fmt.Sprintf("%s 平均延时 %dms。", message, totalLatencyMillis/int64(successCount))
+	}
+	return h.store.SetProxyGroupTestResult(ctx, groupID, status, message)
+}
+
+func (h *Handler) requireProxyGroupEditable(c *gin.Context, id int64) bool {
+	inUse, err := h.store.ProxyGroupInUse(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return false
+	}
+	if inUse {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该代理组正在被运行中的任务使用，无法编辑"})
+		return false
+	}
+	return true
+}
+
 func (h *Handler) listTasks(c *gin.Context) {
 	tasks, err := h.store.ListTasks(c.Request.Context())
 	if err != nil {
@@ -892,6 +1156,36 @@ func validateNotificationInput(c *gin.Context, input model.NotificationInput) bo
 			return false
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Bark Token 或完整推送地址不能为空"})
+		return false
+	}
+	return true
+}
+
+func validateProxyGroupInput(c *gin.Context, input model.ProxyGroupInput) bool {
+	if !requireName(c, input.Name, "代理组名称不能为空") {
+		return false
+	}
+	groupType := model.NormalizeProxyGroupType(input.Type)
+	if groupType == model.ProxyGroupTypeAPI {
+		if model.NormalizeProxyProvider(input.APIProvider) != model.ProxyProviderKuaidailiDPS {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "API 代理组目前仅支持快代理私密代理"})
+			return false
+		}
+		if strings.TrimSpace(input.APIConfig["secretId"]) == "" || strings.TrimSpace(input.APIConfig["secretKey"]) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "快代理 SecretId 和 SecretKey 不能为空"})
+			return false
+		}
+	}
+	return true
+}
+
+func validateProxyNodeInput(c *gin.Context, input model.ProxyNodeInput) bool {
+	if strings.TrimSpace(input.Host) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "代理地址不能为空"})
+		return false
+	}
+	if input.Port <= 0 || input.Port > 65535 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "代理端口必须是 1-65535"})
 		return false
 	}
 	return true

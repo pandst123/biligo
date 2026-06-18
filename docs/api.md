@@ -506,6 +506,8 @@
     "name": "上海场 2 张",
     "accountId": 1,
     "accountName": "主账号",
+    "proxyGroupId": 0,
+    "proxyGroupName": "",
     "projectId": 123456,
     "projectName": "演出名称",
     "screenId": 1001,
@@ -585,6 +587,7 @@
 {
   "name": "上海场 2 张",
   "accountId": 1,
+  "proxyGroupId": 0,
   "projectId": 123456,
   "projectName": "演出名称",
   "screenId": 1001,
@@ -640,6 +643,7 @@
 - `pollIntervalMillis <= 0` 时后端默认修正为 `1000`，单位为毫秒。
 - `timeSyncStrategy` 可选值为 `bilibili` 或 `local`，为空时默认 `bilibili`。
 - `taskMode` 可选值为 `rush`、`restock` 或 `rush_restock`，为空时默认 `rush`。
+- `proxyGroupId` 仅对 `rush` 和 `rush_restock` 生效；`taskMode=restock` 时后端会自动清空代理组。
 - `durationMode` 可选值为 `limited` 或 `unlimited`，为空时默认 `limited`。
 - `rushDurationSeconds <= 0` 时后端默认修正为 `600`；`taskMode=rush_restock` 时该值表示抢票阶段第一次订单请求发出后多少秒再切换回流捡漏。
 - `taskMode=restock` 或 `taskMode=rush_restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
@@ -681,11 +685,19 @@
 
 下发任务。行为由 `taskMode` 决定：
 
-- `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 2 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
+- `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 5 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
 - `restock`：后端不会等待开票、不会进行时间同步和预热，而是立即进入 `running`，按 `pollIntervalMillis` 每轮获取一次票务信息；在最新接口返回顺序中找到第一个属于 `selectedTickets` 且 `clickable=true` 的票种后，先写入任务主票种字段，再复用订单准备、订单创建和支付参数接口。订单准备或创建失败后会回到票种检测；订单已创建但支付参数获取失败时继续重试支付参数。`durationMode=limited` 时超过 `endAt` 会停止检测，`durationMode=unlimited` 时持续检测直到用户停止、删除或下单成功。
 - `rush_restock`：后端会先按抢票模式同步时间、等待起售并预热连接；到达起售时间后直接尝试订单流程。抢票段截止时间为“抢票阶段第一次订单请求发出时间 + `rushDurationSeconds`”，使用同步后的时间 offset 判断。抢票段成功进入 `waiting_payment` 或检测到重复订单时任务结束；抢票窗口结束仍未成功时写入“抢票窗口结束，切换回流捡漏。”日志，并进入回流捡漏流程。切换后的回流段不再重新时间同步或等待开票，`durationMode/endAt` 只作用于回流段。
 
 运行中的接口错误会按 `pollIntervalMillis` 继续重试，成功后进入 `waiting_payment`。
+
+若任务设置了代理组：
+
+- 抢票模式和抢票+回流模式的抢票阶段会使用代理组当前节点；预热连接也会走同一个代理节点。
+- `createV2` 返回 `412` 或 `3` 时立即切换到下一个代理节点重试；其他业务错误继续使用当前节点重试。
+- 代理网络请求失败时会标记当前节点检测失败，并切换到下一个代理节点重试。
+- API 代理组会按 `apiConfig.pullBeforeMinutes` 在抢票前指定分钟数拉取快代理私密代理；未配置时默认 5 分钟，若任务下发时已不足该时间、已到起售时间或已过起售时间，则先立即拉取代理节点再抢票。
+- 抢票+回流模式切到回流阶段后不再使用代理组。
 
 响应：
 
@@ -714,6 +726,140 @@
 ```
 
 实际响应会包含完整任务对象。
+
+## 代理管理
+
+代理组用于抢票模式和抢票+回流模式的抢票阶段。当前支持普通代理组和快代理私密代理 API 组。
+
+代理组对象：
+
+```json
+{
+  "id": 1,
+  "name": "代理组1",
+  "type": "api",
+  "apiProvider": "kuaidaili_dps",
+  "apiConfig": {
+    "secretId": "secret-id",
+    "secretKey": "secret-key",
+    "signType": "hmacsha1",
+    "num": "5",
+    "pullBeforeMinutes": "5",
+    "proxyProtocol": "http"
+  },
+  "lastPullStatus": "success",
+  "lastPullMessage": "已拉取 5 个代理节点。",
+  "lastPulledAt": "2026-06-18T20:00:00+08:00",
+  "lastTestStatus": "success",
+  "lastTestMessage": "检测完成：5/5 个节点可用。",
+  "lastTestedAt": "2026-06-18T20:01:00+08:00",
+  "nodeCount": 5,
+  "availableNodeCount": 5,
+  "inUse": false,
+  "createdAt": "2026-06-18T19:50:00+08:00",
+  "updatedAt": "2026-06-18T20:01:00+08:00"
+}
+```
+
+代理节点对象：
+
+```json
+{
+  "id": 1,
+  "groupId": 1,
+  "name": "节点 1",
+  "protocol": "http",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "username": "user",
+  "password": "pass",
+  "source": "manual",
+  "lastTestStatus": "success",
+  "lastTestMessage": "代理检测通过。",
+  "lastTestLatencyMillis": 86,
+  "lastTestIpLocation": "当前 IP：127.0.0.1 来自于：本地",
+  "lastTestedAt": "2026-06-18T20:01:00+08:00",
+  "createdAt": "2026-06-18T19:50:00+08:00",
+  "updatedAt": "2026-06-18T20:01:00+08:00"
+}
+```
+
+### GET `/api/proxy-groups`
+
+获取全部代理组，包含节点数量、可用节点数量和是否被运行中任务占用。
+
+### POST `/api/proxy-groups`
+
+新增代理组。
+
+请求：
+
+```json
+{
+  "name": "代理组1",
+  "type": "api",
+  "apiProvider": "kuaidaili_dps",
+  "apiConfig": {
+    "secretId": "secret-id",
+    "secretKey": "secret-key",
+    "signType": "hmacsha1",
+    "num": "5",
+    "pullBeforeMinutes": "5",
+    "proxyProtocol": "http"
+  }
+}
+```
+
+`type=static` 时 `apiProvider` 与 `apiConfig` 可为空；`type=api` 目前仅支持 `apiProvider=kuaidaili_dps`。`pullBeforeMinutes` 表示任务起售前多少分钟自动提取代理，缺省为 `5`。
+
+### PUT `/api/proxy-groups/{id}`
+
+更新代理组。若该代理组正在被 `waiting_start` 或 `running` 任务使用，返回 `400`。
+
+### DELETE `/api/proxy-groups/{id}`
+
+删除代理组及其节点。若该代理组正在被运行中任务使用，返回 `400`。
+
+### GET `/api/proxy-groups/{id}/nodes`
+
+获取代理组下的节点列表。
+
+### POST `/api/proxy-groups/{id}/nodes`
+
+新增手动代理节点。
+
+请求：
+
+```json
+{
+  "name": "节点 1",
+  "protocol": "http",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "username": "user",
+  "password": "pass"
+}
+```
+
+`protocol` 可选 `http`、`https`、`socks5`。账号密码可为空。
+
+仅普通代理组支持手动新增节点；API 代理组需要通过“拉取检测”生成节点。
+
+### PUT `/api/proxy-nodes/{id}`
+
+更新代理节点。若所属代理组正在被运行中任务使用，返回 `400`。
+
+### DELETE `/api/proxy-nodes/{id}`
+
+删除代理节点。若所属代理组正在被运行中任务使用，返回 `400`。
+
+### POST `/api/proxy-groups/{id}/test`
+
+检测组内节点可用性，并写入节点与代理组的最近检测结果。节点延时来自通过代理向 `show.bilibili.com` 发起的 `HEAD` 请求，IP 归属地来自通过同一代理请求 `myip.ipip.net`。
+
+### POST `/api/proxy-groups/{id}/pull-test`
+
+仅 API 代理组可用。后端会从快代理私密代理接口拉取节点、落库为 `source=api`，随后检测节点可用性并返回更新后的代理组。
 
 ## 通知管理
 

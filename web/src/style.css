@@ -285,6 +285,10 @@ p {
   top: 24px;
 }
 
+.proxy-form-panel {
+  position: static;
+}
+
 .list-panel {
   align-content: start;
 }
