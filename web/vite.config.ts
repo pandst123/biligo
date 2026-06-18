@@ -7,9 +7,14 @@ export default defineConfig({
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-vue': ['vue'],
-          'vendor-element-plus': ['element-plus', '@element-plus/icons-vue'],
+        manualChunks(id) {
+          const normalizedId = id.replaceAll('\\', '/')
+          if (normalizedId.includes('/node_modules/vue/') || normalizedId.includes('/node_modules/@vue/')) {
+            return 'vendor-vue'
+          }
+          if (normalizedId.includes('/node_modules/element-plus/') || normalizedId.includes('/node_modules/@element-plus/icons-vue/')) {
+            return 'vendor-element-plus'
+          }
         },
       },
     },

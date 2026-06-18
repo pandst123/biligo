@@ -6,8 +6,9 @@
 | 模块 | 技术 |
 | --- | --- |
 | 后端服务 | Go, Gin |
-| 前端控制台 | Vue 3, Vite, TypeScript, Element Plus |
-| 前端包管理 | pnpm |
+| 前端控制台 | Vue 3, Vite 8, TypeScript 6, Element Plus |
+| 前端运行环境 | Node.js 24 |
+| 前端包管理 | pnpm 11.7 |
 | 数据存储 | SQLite |
 | 实时状态 | SSE |
 | 部署形态 | 本地单用户运行 |
