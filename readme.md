@@ -121,14 +121,9 @@ http://127.0.0.1:8080/api/health
 <summary>展开查看 Docker 部署说明</summary>
 
 本仓库发布的 Docker 镜像默认已嵌入前端页面，容器启动后只需要暴露一个端口，同时提供 Web 控制台和 `/api`。
+Release 发布时会同时推送到 Docker Hub 和 GitHub Container Registry，也可使用阿里云镜像源。
 
-### 1. 拉取镜像
-
-```bash
-docker pull ghcr.io/fdcs99/biligo:latest
-```
-
-### 2. 准备运行目录
+### 1. 准备运行目录
 
 建议把配置、数据库和日志挂载到宿主机，方便升级镜像后继续使用：
 
@@ -139,29 +134,68 @@ cp config.example.yaml config.yaml
 
 如果没有提前准备 `config.yaml`，程序也会在容器内自动生成 `/app/config.yaml`，并在启动日志中输出面板登录密码。
 
-### 3. 启动容器
+### 2. 选择镜像部署（三选一）
 
-已准备 `config.yaml` 时：
+三种部署方式只有镜像地址不同，端口、挂载和环境变量可以保持一致。展开对应镜像源执行即可。
+
+<details>
+<summary>Docker Hub 镜像部署</summary>
 
 ```bash
+IMAGE=fdcs99/biligo:latest
+docker pull "$IMAGE"
+
 docker run -d \
   --name biligo \
   -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
-  ghcr.io/fdcs99/biligo:latest
+  "$IMAGE"
 ```
 
-如果还没有准备 `config.yaml`，可以先不挂载配置文件：
+</details>
+
+<details>
+<summary>GitHub Container Registry 镜像部署</summary>
 
 ```bash
+IMAGE=ghcr.io/fdcs99/biligo:latest
+docker pull "$IMAGE"
+
 docker run -d \
   --name biligo \
   -p 8080:8080 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
-  ghcr.io/fdcs99/biligo:latest
+  "$IMAGE"
+```
+
+</details>
+
+<details>
+<summary>阿里云镜像部署</summary>
+
+```bash
+IMAGE=crpi-rlahqzawqg2sd5in.cn-hangzhou.personal.cr.aliyuncs.com/fdcs99/biligo:latest
+docker pull "$IMAGE"
+
+docker run -d \
+  --name biligo \
+  -p 8080:8080 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/logs:/app/logs" \
+  "$IMAGE"
+```
+
+</details>
+
+如果还没有准备 `config.yaml`，可以把对应部署命令中的这一行删除：
+
+```bash
+-v "$PWD/config.yaml:/app/config.yaml" \
 ```
 
 启动后访问：
@@ -176,7 +210,7 @@ http://127.0.0.1:8080/
 docker logs -f biligo
 ```
 
-### 4. 使用环境变量调整参数
+### 3. 使用环境变量调整参数
 
 ```bash
 docker run -d \
@@ -187,7 +221,7 @@ docker run -d \
   -v "$PWD/logs:/app/logs" \
   -e BILIGO_ADDR=":18080" \
   -e BILIGO_PANEL_PASSWORD="your-panel-password" \
-  ghcr.io/fdcs99/biligo:latest
+  "$IMAGE"
 ```
 
 常用环境变量：
@@ -198,7 +232,7 @@ docker run -d \
 - `BILIGO_LOG_LEVELS`：日志等级，例如 `info,warn,error`，设置为 `none` 可关闭输出。
 - `BILIGO_LOG_COLOR`：控制台颜色，支持 `auto`、`always`、`never`。
 
-### 5. 停止和升级
+### 4. 停止和升级
 
 停止并删除当前容器：
 
@@ -210,7 +244,7 @@ docker rm biligo
 升级到最新镜像后，使用同样的 `docker run` 命令重新启动即可：
 
 ```bash
-docker pull ghcr.io/fdcs99/biligo:latest
+docker pull "$IMAGE"
 docker stop biligo
 docker rm biligo
 # 重新执行上面的 docker run 命令
