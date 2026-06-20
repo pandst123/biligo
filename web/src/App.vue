@@ -178,6 +178,8 @@ const taskForm = reactive<TaskInput>({
   startAt: '',
   endAt: '',
   pollIntervalMillis: 1000,
+  rushPollIntervalMillis: 1000,
+  restockPollIntervalMillis: 1000,
 })
 
 const selectedTaskId = ref<number | null>(null)
@@ -230,7 +232,8 @@ const canSaveTask = computed(
     Boolean(taskForm.deliverInfo?.id) &&
     taskForm.buyer.trim() !== '' &&
     taskForm.tel.trim() !== '' &&
-    taskForm.pollIntervalMillis > 0,
+    ((!isHybridTaskForm.value && taskForm.pollIntervalMillis > 0) ||
+      (isHybridTaskForm.value && taskForm.rushPollIntervalMillis > 0 && taskForm.restockPollIntervalMillis > 0)),
 )
 const canSaveNotification = computed(
   () => notificationForm.name.trim() !== '' &&
@@ -925,6 +928,8 @@ function resetTaskForm() {
     startAt: '',
     endAt: '',
     pollIntervalMillis: 1000,
+    rushPollIntervalMillis: 1000,
+    restockPollIntervalMillis: 1000,
   })
 }
 
@@ -963,6 +968,8 @@ function editTask(task: Task) {
     startAt: task.startAt,
     endAt: task.endAt,
     pollIntervalMillis: task.pollIntervalMillis || 1000,
+    rushPollIntervalMillis: task.rushPollIntervalMillis || task.pollIntervalMillis || 1000,
+    restockPollIntervalMillis: task.restockPollIntervalMillis || task.pollIntervalMillis || 1000,
   })
   restoreTicketSelectionFromTask(task)
   activeSection.value = 'taskConfig'
@@ -984,6 +991,12 @@ async function saveTask() {
     }
     if (isHybridTaskForm.value && taskForm.rushDurationSeconds <= 0) {
       throw new Error('抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数')
+    }
+    if (isHybridTaskForm.value && taskForm.rushPollIntervalMillis <= 0) {
+      throw new Error('抢票+回流捡漏模式需要设置大于 0 的抢票阶段重试间隔')
+    }
+    if (isHybridTaskForm.value && taskForm.restockPollIntervalMillis <= 0) {
+      throw new Error('抢票+回流捡漏模式需要设置大于 0 的回流阶段重试间隔')
     }
     if (hasRushTaskSection.value && taskForm.proxyMode === 'concurrent' && Number(taskForm.proxyGroupId || 0) <= 0) {
       throw new Error('并发代理需要选择代理组')
@@ -1055,6 +1068,18 @@ function normalizeTaskModeFields() {
   }
   if (!['round_robin', 'concurrent'].includes(taskForm.proxyMode)) {
     taskForm.proxyMode = 'round_robin'
+  }
+  if (taskForm.pollIntervalMillis <= 0) {
+    taskForm.pollIntervalMillis = 1000
+  }
+  if (!isHybridTaskForm.value) {
+    taskForm.rushPollIntervalMillis = taskForm.pollIntervalMillis
+    taskForm.restockPollIntervalMillis = taskForm.pollIntervalMillis
+  } else if (taskForm.rushPollIntervalMillis <= 0) {
+    taskForm.rushPollIntervalMillis = taskForm.pollIntervalMillis
+  }
+  if (isHybridTaskForm.value && taskForm.restockPollIntervalMillis <= 0) {
+    taskForm.restockPollIntervalMillis = taskForm.pollIntervalMillis
   }
   if (!hasRestockTaskSection.value) {
     taskForm.durationMode = 'limited'
@@ -2698,11 +2723,23 @@ onUnmounted(() => {
             </el-col>
           </el-row>
           <el-row :gutter="12">
-            <el-col :xs="24" :sm="12">
+            <el-col v-if="!isHybridTaskForm" :xs="24" :sm="12">
               <el-form-item required label="重试间隔（ms）">
                 <el-input-number v-model="taskForm.pollIntervalMillis" :min="1" controls-position="right" class="full-input" />
               </el-form-item>
             </el-col>
+            <template v-else>
+              <el-col :xs="24" :sm="12">
+                <el-form-item required label="抢票阶段重试间隔（ms）">
+                  <el-input-number v-model="taskForm.rushPollIntervalMillis" :min="1" controls-position="right" class="full-input" />
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :sm="12">
+                <el-form-item required label="回流阶段重试间隔（ms）">
+                  <el-input-number v-model="taskForm.restockPollIntervalMillis" :min="1" controls-position="right" class="full-input" />
+                </el-form-item>
+              </el-col>
+            </template>
             <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item label="时间同步策略">
                 <el-select v-model="taskForm.timeSyncStrategy">

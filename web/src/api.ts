@@ -283,6 +283,8 @@ export interface Task {
   startAt: string
   endAt: string
   pollIntervalMillis: number
+  rushPollIntervalMillis: number
+  restockPollIntervalMillis: number
   status: string
   lastMessage: string
   createdAt: string
@@ -322,6 +324,8 @@ export interface TaskInput {
   startAt: string
   endAt: string
   pollIntervalMillis: number
+  rushPollIntervalMillis: number
+  restockPollIntervalMillis: number
 }
 
 export interface TaskLog {

@@ -259,10 +259,7 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 	}
 
 	m.setRuntime(taskID, "running", "已到起售时间，开始准备订单。", "info")
-	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
-	if interval <= 0 {
-		interval = time.Second
-	}
+	interval := taskPollInterval(task.PollIntervalMillis)
 
 	deadlineExceeded := func() bool {
 		return nowWithOffset(timeOffset).After(endAt)
@@ -306,10 +303,7 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 	}
 
 	m.setRuntime(taskID, "running", fmt.Sprintf("已到起售时间，开始抢票；%d 秒后切换回流捡漏。", int(rushDuration.Seconds())), "info")
-	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
-	if interval <= 0 {
-		interval = time.Second
-	}
+	interval := taskPollInterval(task.RushPollIntervalMillis)
 
 	switchMessage := "抢票窗口结束，切换回流捡漏。"
 	var rushStartedAt time.Time
@@ -347,10 +341,7 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 }
 
 func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, task model.Task) {
-	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
-	if interval <= 0 {
-		interval = time.Second
-	}
+	interval := restockPollInterval(task)
 
 	var deadlineExceeded func() bool
 	if model.NormalizeDurationMode(task.DurationMode) == model.DurationModeLimited {
@@ -826,10 +817,7 @@ prepareLoop:
 				continue
 			}
 
-			interval := time.Duration(latestTask.PollIntervalMillis) * time.Millisecond
-			if interval <= 0 {
-				interval = time.Second
-			}
+			interval := restockPollInterval(latestTask)
 			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime)
 			if !ok {
 				return orderAttemptStopped
@@ -1088,6 +1076,20 @@ func createErrorRetryInterval(result biliticket.OrderCreateResult, proxyRuntime 
 		return noProxyCreate412RetryWait
 	}
 	return fallback
+}
+
+func taskPollInterval(milliseconds int) time.Duration {
+	if milliseconds <= 0 {
+		return time.Second
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
+func restockPollInterval(task model.Task) time.Duration {
+	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeHybrid {
+		return taskPollInterval(task.RestockPollIntervalMillis)
+	}
+	return taskPollInterval(task.PollIntervalMillis)
 }
 
 func (m *Manager) switchProxyOnRequestError(ctx context.Context, taskID int64, proxyRuntime *taskProxyRuntime, err error) bool {
@@ -1431,6 +1433,12 @@ func validateTask(task model.Task) error {
 	}
 	if taskMode == model.TaskModeHybrid && task.RushDurationSeconds <= 0 {
 		return errors.New("抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数")
+	}
+	if taskMode == model.TaskModeHybrid && task.RushPollIntervalMillis <= 0 {
+		return errors.New("抢票+回流捡漏模式需要设置大于 0 的抢票阶段重试间隔")
+	}
+	if taskMode == model.TaskModeHybrid && task.RestockPollIntervalMillis <= 0 {
+		return errors.New("抢票+回流捡漏模式需要设置大于 0 的回流阶段重试间隔")
 	}
 	if hasRestockStage && durationMode == model.DurationModeLimited {
 		if _, err := parseTaskTime(task.EndAt); err != nil {

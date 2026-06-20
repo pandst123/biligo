@@ -112,19 +112,21 @@ func TestValidateRestockTaskRequiresSelectedTickets(t *testing.T) {
 
 func TestValidateHybridTaskRequirements(t *testing.T) {
 	task := model.Task{
-		AccountID:           1,
-		ProjectID:           1001701,
-		ScreenID:            2001,
-		SKUID:               3001,
-		SaleStart:           "2026-06-13 20:00:00",
-		TaskMode:            model.TaskModeHybrid,
-		DurationMode:        model.DurationModeUnlimited,
-		SelectedTickets:     []model.TicketOption{{ProjectID: 1001701, ScreenID: 2001, SKUID: 3001}},
-		RushDurationSeconds: 600,
-		BuyerInfo:           []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
-		Buyer:               "张三",
-		Tel:                 "13800000000",
-		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+		AccountID:                 1,
+		ProjectID:                 1001701,
+		ScreenID:                  2001,
+		SKUID:                     3001,
+		SaleStart:                 "2026-06-13 20:00:00",
+		TaskMode:                  model.TaskModeHybrid,
+		DurationMode:              model.DurationModeUnlimited,
+		SelectedTickets:           []model.TicketOption{{ProjectID: 1001701, ScreenID: 2001, SKUID: 3001}},
+		RushDurationSeconds:       600,
+		RushPollIntervalMillis:    100,
+		RestockPollIntervalMillis: 200,
+		BuyerInfo:                 []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:                     "张三",
+		Tel:                       "13800000000",
+		DeliverInfo:               &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
 	}
 	if err := validateTask(task); err != nil {
 		t.Fatalf("validateTask returned error: %v", err)
@@ -140,6 +142,16 @@ func TestValidateHybridTaskRequirements(t *testing.T) {
 		t.Fatal("validateTask returned nil for hybrid task without rush duration")
 	}
 	task.RushDurationSeconds = 600
+	task.RushPollIntervalMillis = 0
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for hybrid task without rush poll interval")
+	}
+	task.RushPollIntervalMillis = 100
+	task.RestockPollIntervalMillis = 0
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for hybrid task without restock poll interval")
+	}
+	task.RestockPollIntervalMillis = 200
 	task.DurationMode = model.DurationModeLimited
 	task.EndAt = ""
 	if err := validateTask(task); err == nil {
@@ -1619,37 +1631,39 @@ func updateTaskProxyGroup(t *testing.T, taskStore *store.Store, task model.Task,
 func updateTaskProxyGroupWithMode(t *testing.T, taskStore *store.Store, task model.Task, proxyGroupID int64, proxyMode string) model.Task {
 	t.Helper()
 	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
-		Name:               task.Name,
-		AccountID:          task.AccountID,
-		ProxyGroupID:       proxyGroupID,
-		ProxyMode:          proxyMode,
-		ProjectID:          task.ProjectID,
-		ProjectName:        task.ProjectName,
-		ScreenID:           task.ScreenID,
-		SKUID:              task.SKUID,
-		SessionName:        task.SessionName,
-		TicketLevel:        task.TicketLevel,
-		TicketDisplay:      task.TicketDisplay,
-		TicketPrice:        task.TicketPrice,
-		SaleStart:          task.SaleStart,
-		SaleStatus:         task.SaleStatus,
-		LinkID:             task.LinkID,
-		IsHotProject:       task.IsHotProject,
-		TaskMode:           task.TaskMode,
-		DurationMode:       task.DurationMode,
-		SelectedTickets:    task.SelectedTickets,
-		OrderType:          task.OrderType,
-		PayMoney:           task.PayMoney,
-		BuyerInfo:          task.BuyerInfo,
-		Buyer:              task.Buyer,
-		Tel:                task.Tel,
-		DeliverInfo:        task.DeliverInfo,
-		Phone:              task.Phone,
-		TimeSyncStrategy:   task.TimeSyncStrategy,
-		Quantity:           task.Quantity,
-		StartAt:            task.StartAt,
-		EndAt:              task.EndAt,
-		PollIntervalMillis: task.PollIntervalMillis,
+		Name:                      task.Name,
+		AccountID:                 task.AccountID,
+		ProxyGroupID:              proxyGroupID,
+		ProxyMode:                 proxyMode,
+		ProjectID:                 task.ProjectID,
+		ProjectName:               task.ProjectName,
+		ScreenID:                  task.ScreenID,
+		SKUID:                     task.SKUID,
+		SessionName:               task.SessionName,
+		TicketLevel:               task.TicketLevel,
+		TicketDisplay:             task.TicketDisplay,
+		TicketPrice:               task.TicketPrice,
+		SaleStart:                 task.SaleStart,
+		SaleStatus:                task.SaleStatus,
+		LinkID:                    task.LinkID,
+		IsHotProject:              task.IsHotProject,
+		TaskMode:                  task.TaskMode,
+		DurationMode:              task.DurationMode,
+		SelectedTickets:           task.SelectedTickets,
+		OrderType:                 task.OrderType,
+		PayMoney:                  task.PayMoney,
+		BuyerInfo:                 task.BuyerInfo,
+		Buyer:                     task.Buyer,
+		Tel:                       task.Tel,
+		DeliverInfo:               task.DeliverInfo,
+		Phone:                     task.Phone,
+		TimeSyncStrategy:          task.TimeSyncStrategy,
+		Quantity:                  task.Quantity,
+		StartAt:                   task.StartAt,
+		EndAt:                     task.EndAt,
+		PollIntervalMillis:        task.PollIntervalMillis,
+		RushPollIntervalMillis:    task.RushPollIntervalMillis,
+		RestockPollIntervalMillis: task.RestockPollIntervalMillis,
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask proxy group: %v", err)
@@ -1730,29 +1744,31 @@ func createHybridTaskAt(t *testing.T, saleStart time.Time, rushDurationSeconds i
 		t.Fatalf("CreateAccountWithStatus: %v", err)
 	}
 	task, err := taskStore.CreateTask(context.Background(), model.TaskInput{
-		Name:                "组合任务",
-		AccountID:           account.ID,
-		ProjectID:           1001701,
-		ProjectName:         "测试项目",
-		ScreenID:            2001,
-		SKUID:               3001,
-		SessionName:         "晚场",
-		TicketLevel:         "VIP",
-		TicketDisplay:       "晚场 - VIP",
-		TicketPrice:         68000,
-		SaleStart:           formatBusinessTaskTime(saleStart),
-		SaleStatus:          "未开始",
-		TaskMode:            model.TaskModeHybrid,
-		DurationMode:        durationMode,
-		SelectedTickets:     []model.TicketOption{{Value: "1001701:2001:3001:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3001, ScreenName: "晚场", TicketLevel: "VIP", Price: 68000}},
-		RushDurationSeconds: rushDurationSeconds,
-		OrderType:           1,
-		BuyerInfo:           []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
-		Buyer:               "张三",
-		Tel:                 "13800000000",
-		DeliverInfo:         &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
-		EndAt:               endAt,
-		PollIntervalMillis:  50,
+		Name:                      "组合任务",
+		AccountID:                 account.ID,
+		ProjectID:                 1001701,
+		ProjectName:               "测试项目",
+		ScreenID:                  2001,
+		SKUID:                     3001,
+		SessionName:               "晚场",
+		TicketLevel:               "VIP",
+		TicketDisplay:             "晚场 - VIP",
+		TicketPrice:               68000,
+		SaleStart:                 formatBusinessTaskTime(saleStart),
+		SaleStatus:                "未开始",
+		TaskMode:                  model.TaskModeHybrid,
+		DurationMode:              durationMode,
+		SelectedTickets:           []model.TicketOption{{Value: "1001701:2001:3001:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3001, ScreenName: "晚场", TicketLevel: "VIP", Price: 68000}},
+		RushDurationSeconds:       rushDurationSeconds,
+		OrderType:                 1,
+		BuyerInfo:                 []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
+		Buyer:                     "张三",
+		Tel:                       "13800000000",
+		DeliverInfo:               &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
+		EndAt:                     endAt,
+		PollIntervalMillis:        50,
+		RushPollIntervalMillis:    30,
+		RestockPollIntervalMillis: 80,
 	})
 	if err != nil {
 		taskStore.Close()

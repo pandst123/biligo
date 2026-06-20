@@ -79,44 +79,52 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.PollIntervalMillis != 200 {
 		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
 	}
+	if task.RushPollIntervalMillis != 200 || task.RestockPollIntervalMillis != 200 {
+		t.Fatalf("stage poll intervals = %d/%d, want 200/200", task.RushPollIntervalMillis, task.RestockPollIntervalMillis)
+	}
 
 	task, err = store.UpdateTask(context.Background(), task.ID, model.TaskInput{
-		Name:                task.Name,
-		AccountID:           task.AccountID,
-		ProjectID:           task.ProjectID,
-		ProjectName:         task.ProjectName,
-		ScreenID:            task.ScreenID,
-		SKUID:               task.SKUID,
-		SessionName:         task.SessionName,
-		TicketLevel:         task.TicketLevel,
-		TicketDisplay:       task.TicketDisplay,
-		TicketPrice:         task.TicketPrice,
-		SaleStart:           task.SaleStart,
-		SaleStatus:          task.SaleStatus,
-		LinkID:              task.LinkID,
-		IsHotProject:        task.IsHotProject,
-		TaskMode:            model.TaskModeHybrid,
-		DurationMode:        model.DurationModeUnlimited,
-		SelectedTickets:     task.SelectedTickets,
-		RushDurationSeconds: 45,
-		OrderType:           task.OrderType,
-		PayMoney:            task.PayMoney,
-		BuyerInfo:           task.BuyerInfo,
-		Buyer:               task.Buyer,
-		Tel:                 task.Tel,
-		DeliverInfo:         task.DeliverInfo,
-		Phone:               task.Phone,
-		TimeSyncStrategy:    task.TimeSyncStrategy,
-		Quantity:            task.Quantity,
-		StartAt:             task.StartAt,
-		EndAt:               task.EndAt,
-		PollIntervalMillis:  task.PollIntervalMillis,
+		Name:                      task.Name,
+		AccountID:                 task.AccountID,
+		ProjectID:                 task.ProjectID,
+		ProjectName:               task.ProjectName,
+		ScreenID:                  task.ScreenID,
+		SKUID:                     task.SKUID,
+		SessionName:               task.SessionName,
+		TicketLevel:               task.TicketLevel,
+		TicketDisplay:             task.TicketDisplay,
+		TicketPrice:               task.TicketPrice,
+		SaleStart:                 task.SaleStart,
+		SaleStatus:                task.SaleStatus,
+		LinkID:                    task.LinkID,
+		IsHotProject:              task.IsHotProject,
+		TaskMode:                  model.TaskModeHybrid,
+		DurationMode:              model.DurationModeUnlimited,
+		SelectedTickets:           task.SelectedTickets,
+		RushDurationSeconds:       45,
+		OrderType:                 task.OrderType,
+		PayMoney:                  task.PayMoney,
+		BuyerInfo:                 task.BuyerInfo,
+		Buyer:                     task.Buyer,
+		Tel:                       task.Tel,
+		DeliverInfo:               task.DeliverInfo,
+		Phone:                     task.Phone,
+		TimeSyncStrategy:          task.TimeSyncStrategy,
+		Quantity:                  task.Quantity,
+		StartAt:                   task.StartAt,
+		EndAt:                     task.EndAt,
+		PollIntervalMillis:        task.PollIntervalMillis,
+		RushPollIntervalMillis:    120,
+		RestockPollIntervalMillis: 450,
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 	if task.TaskMode != model.TaskModeHybrid || task.RushDurationSeconds != 45 {
 		t.Fatalf("updated task mode/duration = %q/%d", task.TaskMode, task.RushDurationSeconds)
+	}
+	if task.RushPollIntervalMillis != 120 || task.RestockPollIntervalMillis != 450 {
+		t.Fatalf("updated stage poll intervals = %d/%d, want 120/450", task.RushPollIntervalMillis, task.RestockPollIntervalMillis)
 	}
 
 	task, log, err := store.SetTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 88, "2026-06-14T10:00:00+08:00", "时间同步完成")
@@ -183,6 +191,8 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		"time_offset_ms",
 		"time_synced_at",
 		"poll_interval_ms",
+		"rush_poll_interval_ms",
+		"restock_poll_interval_ms",
 	} {
 		if !columnExists(t, store, "tasks", column) {
 			t.Fatalf("tasks.%s should exist", column)

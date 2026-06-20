@@ -158,6 +158,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			start_at TEXT NOT NULL DEFAULT '',
 			end_at TEXT NOT NULL DEFAULT '',
 			poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
+			rush_poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
+			restock_poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
 			status TEXT NOT NULL DEFAULT 'draft',
 			last_message TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
@@ -181,6 +183,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "tasks", "proxy_mode", "TEXT NOT NULL DEFAULT 'round_robin'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "rush_poll_interval_ms", "INTEGER NOT NULL DEFAULT 1000"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "restock_poll_interval_ms", "INTEGER NOT NULL DEFAULT 1000"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "proxy_nodes", "last_test_latency_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -764,7 +772,8 @@ func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
-			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
+			t.poll_interval_ms, t.rush_poll_interval_ms, t.restock_poll_interval_ms,
+			t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
@@ -810,11 +819,11 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 				task_mode, duration_mode, selected_tickets, rush_duration_seconds,
 				order_type, pay_money, buyer_info, buyer, tel, deliver_info, phone,
 			time_sync_strategy,
-			quantity, start_at, end_at, poll_interval_ms,
+			quantity, start_at, end_at, poll_interval_ms, rush_poll_interval_ms, restock_poll_interval_ms,
 			status, last_message, created_at, updated_at
 		)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
+		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -842,7 +851,8 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
-			t.poll_interval_ms, t.status, t.last_message, t.created_at, t.updated_at
+			t.poll_interval_ms, t.rush_poll_interval_ms, t.restock_poll_interval_ms,
+			t.status, t.last_message, t.created_at, t.updated_at
 		FROM tasks t
 		LEFT JOIN accounts a ON a.id = t.account_id
 		LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
@@ -875,9 +885,9 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 			task_mode = ?, duration_mode = ?, selected_tickets = ?, rush_duration_seconds = ?,
 			order_type = ?, pay_money = ?, buyer_info = ?, buyer = ?, tel = ?, deliver_info = ?, phone = ?,
 			time_sync_strategy = ?,
-			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, updated_at = ?
+			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, rush_poll_interval_ms = ?, restock_poll_interval_ms = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -1364,6 +1374,8 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&task.StartAt,
 		&task.EndAt,
 		&task.PollIntervalMillis,
+		&task.RushPollIntervalMillis,
+		&task.RestockPollIntervalMillis,
 		&task.Status,
 		&task.LastMessage,
 		&task.CreatedAt,
@@ -1377,6 +1389,15 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 	task.DurationMode = model.NormalizeDurationMode(task.DurationMode)
 	if task.RushDurationSeconds <= 0 {
 		task.RushDurationSeconds = model.DefaultRushDurationSeconds
+	}
+	if task.PollIntervalMillis <= 0 {
+		task.PollIntervalMillis = 1000
+	}
+	if task.RushPollIntervalMillis <= 0 {
+		task.RushPollIntervalMillis = task.PollIntervalMillis
+	}
+	if task.RestockPollIntervalMillis <= 0 {
+		task.RestockPollIntervalMillis = task.PollIntervalMillis
 	}
 	if err := unmarshalJSON(selectedTickets, &task.SelectedTickets); err != nil {
 		return err
@@ -1430,6 +1451,12 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	}
 	if input.PollIntervalMillis <= 0 {
 		input.PollIntervalMillis = 1000
+	}
+	if input.RushPollIntervalMillis <= 0 {
+		input.RushPollIntervalMillis = input.PollIntervalMillis
+	}
+	if input.RestockPollIntervalMillis <= 0 {
+		input.RestockPollIntervalMillis = input.PollIntervalMillis
 	}
 	return input
 }
