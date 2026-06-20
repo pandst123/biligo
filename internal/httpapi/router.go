@@ -1032,7 +1032,7 @@ func (h *Handler) listTasks(c *gin.Context) {
 
 func (h *Handler) createTask(c *gin.Context) {
 	var input model.TaskInput
-	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") {
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") || !validateTaskInput(c, input) {
 		return
 	}
 	task, err := h.store.CreateTask(c.Request.Context(), input)
@@ -1050,7 +1050,7 @@ func (h *Handler) updateTask(c *gin.Context) {
 		return
 	}
 	var input model.TaskInput
-	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") {
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "任务名称不能为空") || !validateTaskInput(c, input) {
 		return
 	}
 	task, err := h.store.UpdateTask(c.Request.Context(), id, input)
@@ -1060,6 +1060,16 @@ func (h *Handler) updateTask(c *gin.Context) {
 	}
 	h.hub.Publish("task.updated", task)
 	c.JSON(http.StatusOK, task)
+}
+
+func validateTaskInput(c *gin.Context, input model.TaskInput) bool {
+	taskMode := model.NormalizeTaskMode(input.TaskMode)
+	hasRushStage := taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid
+	if hasRushStage && model.NormalizeProxyMode(input.ProxyMode) == model.ProxyModeConcurrent && input.ProxyGroupID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "并发代理需要选择代理组"})
+		return false
+	}
+	return true
 }
 
 func (h *Handler) deleteTask(c *gin.Context) {

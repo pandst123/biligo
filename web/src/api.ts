@@ -248,6 +248,7 @@ export interface Task {
   accountName: string
   proxyGroupId: number
   proxyGroupName: string
+  proxyMode: string
   projectId: number
   projectName: string
   screenId: number
@@ -292,6 +293,7 @@ export interface TaskInput {
   name: string
   accountId: number
   proxyGroupId: number
+  proxyMode: string
   projectId: number
   projectName: string
   screenId: number

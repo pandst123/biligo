@@ -508,6 +508,7 @@
     "accountName": "主账号",
     "proxyGroupId": 0,
     "proxyGroupName": "",
+    "proxyMode": "round_robin",
     "projectId": 123456,
     "projectName": "演出名称",
     "screenId": 1001,
@@ -588,6 +589,7 @@
   "name": "上海场 2 张",
   "accountId": 1,
   "proxyGroupId": 0,
+  "proxyMode": "round_robin",
   "projectId": 123456,
   "projectName": "演出名称",
   "screenId": 1001,
@@ -644,6 +646,7 @@
 - `timeSyncStrategy` 可选值为 `bilibili` 或 `local`，为空时默认 `bilibili`。
 - `taskMode` 可选值为 `rush`、`restock` 或 `rush_restock`，为空时默认 `rush`。
 - `proxyGroupId` 仅对 `rush` 和 `rush_restock` 生效；`taskMode=restock` 时后端会自动清空代理组。
+- `proxyMode` 可选值为 `round_robin` 或 `concurrent`，为空时默认 `round_robin`；`concurrent` 需要选择代理组。
 - `durationMode` 可选值为 `limited` 或 `unlimited`，为空时默认 `limited`。
 - `rushDurationSeconds <= 0` 时后端默认修正为 `600`；`taskMode=rush_restock` 时该值表示抢票阶段第一次订单请求发出后多少秒再切换回流捡漏。
 - `taskMode=restock` 或 `taskMode=rush_restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
@@ -693,11 +696,10 @@
 
 若任务设置了代理组：
 
-- 抢票模式和抢票+回流模式的抢票阶段会使用代理组当前节点；预热连接也会走同一个代理节点。
-- `createV2` 返回 `412` 或 `3` 时立即切换到下一个代理节点重试；其他业务错误继续使用当前节点重试。
-- 代理网络请求失败时会标记当前节点检测失败，并切换到下一个代理节点重试。
-- API 代理组会按 `apiConfig.pullBeforeMinutes` 在抢票前指定分钟数拉取快代理私密代理；未配置时默认 5 分钟，若任务下发时已不足该时间、已到起售时间或已过起售时间，则先立即拉取代理节点再抢票。
-- 抢票+回流模式切到回流阶段后不再使用代理组。
+- 抢票模式和抢票+回流模式的抢票阶段会按 `proxyMode` 使用代理组；回流模式和抢票+回流模式的回流阶段不使用代理组。
+- `proxyMode=round_robin` 为循环代理：任务使用代理组当前节点，预热连接也会走同一个代理节点；`createV2` 返回 `412` 或 `3` 时立即切换到下一个代理节点重试，其他业务错误继续使用当前节点重试；代理网络请求失败时会标记当前节点检测失败，并切换到下一个代理节点重试。
+- `proxyMode=concurrent` 为并发代理：每个可用代理节点启动一个抢票 worker，worker 固定使用自己的代理节点，不在线程内切换代理；任一 worker 成功进入 `waiting_payment` 或检测到重复订单后，会停止其他 worker。
+- API 代理组会按 `apiConfig.pullBeforeMinutes` 在抢票前指定分钟数拉取快代理私密代理；未配置时默认 5 分钟，若任务下发时已不足该时间、已到起售时间或已过起售时间，则先立即拉取代理节点再抢票；拉取完成日志会输出本次准备好的全部代理节点。
 
 响应：
 
@@ -729,7 +731,7 @@
 
 ## 代理管理
 
-代理组用于抢票模式和抢票+回流模式的抢票阶段。当前支持普通代理组和快代理私密代理 API 组。
+代理组用于抢票模式和抢票+回流模式的抢票阶段。当前支持普通代理组和快代理私密代理 API 组；任务可通过 `proxyMode` 选择循环代理或并发代理。
 
 代理组对象：
 

@@ -121,6 +121,26 @@ func TestPanelAuthProtectsAPIs(t *testing.T) {
 	}
 }
 
+func TestTaskAPIsRejectConcurrentProxyWithoutGroup(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+	body := bytes.NewBufferString(`{"name":"并发代理任务","accountId":1,"proxyMode":"concurrent","projectId":1001701,"screenId":2001,"skuId":3001,"ticketDisplay":"晚场 - VIP","saleStart":"2026-06-13 20:00:00","buyerInfo":[{"name":"张三","personalId":"110101199001010000"}],"buyer":"张三","tel":"13800000000","deliverInfo":{"id":9,"name":"张三","phone":"13800000000"},"pollIntervalMillis":1000}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "并发代理需要选择代理组") {
+		t.Fatalf("create concurrent proxy task status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestPanelAuthProtectsEventsAndAllowsQueryToken(t *testing.T) {
 	taskStore, err := store.Open(":memory:")
 	if err != nil {

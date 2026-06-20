@@ -149,6 +149,7 @@ const taskForm = reactive<TaskInput>({
   name: '',
   accountId: 0,
   proxyGroupId: 0,
+  proxyMode: 'round_robin',
   projectId: 0,
   projectName: '',
   screenId: 0,
@@ -223,6 +224,7 @@ const canSaveTask = computed(
     (!hasRushTaskSection.value || (taskForm.ticketDisplay.trim() !== '' && taskForm.skuId > 0 && taskForm.saleStart.trim() !== '')) &&
     (!hasRestockTaskSection.value || taskForm.selectedTickets.length > 0) &&
     (!isHybridTaskForm.value || taskForm.rushDurationSeconds > 0) &&
+    (!hasRushTaskSection.value || taskForm.proxyMode !== 'concurrent' || Number(taskForm.proxyGroupId || 0) > 0) &&
     (!hasRestockTaskSection.value || taskForm.durationMode !== 'limited' || taskForm.endAt.trim() !== '') &&
     taskForm.buyerInfo.length > 0 &&
     Boolean(taskForm.deliverInfo?.id) &&
@@ -894,6 +896,7 @@ function resetTaskForm() {
     name: '',
     accountId: accounts.value[0]?.id ?? 0,
     proxyGroupId: 0,
+    proxyMode: 'round_robin',
     projectId: 0,
     projectName: '',
     screenId: 0,
@@ -931,6 +934,7 @@ function editTask(task: Task) {
     name: task.name,
     accountId: task.accountId,
     proxyGroupId: task.proxyGroupId || 0,
+    proxyMode: task.proxyMode || 'round_robin',
     projectId: task.projectId,
     projectName: task.projectName,
     screenId: task.screenId,
@@ -980,6 +984,9 @@ async function saveTask() {
     }
     if (isHybridTaskForm.value && taskForm.rushDurationSeconds <= 0) {
       throw new Error('抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数')
+    }
+    if (hasRushTaskSection.value && taskForm.proxyMode === 'concurrent' && Number(taskForm.proxyGroupId || 0) <= 0) {
+      throw new Error('并发代理需要选择代理组')
     }
     if (hasRestockTaskSection.value && taskForm.durationMode === 'limited' && !taskForm.endAt.trim()) {
       throw new Error('回流捡漏有限模式需要设置截止时间')
@@ -1038,8 +1045,16 @@ function normalizeTaskModeFields() {
   if (!['rush', 'restock', 'rush_restock'].includes(taskForm.taskMode)) {
     taskForm.taskMode = 'rush'
   }
+  taskForm.proxyGroupId = Number(taskForm.proxyGroupId || 0)
   if (!hasRushTaskSection.value) {
     taskForm.proxyGroupId = 0
+    taskForm.proxyMode = 'round_robin'
+  }
+  if (Number(taskForm.proxyGroupId || 0) <= 0) {
+    taskForm.proxyMode = 'round_robin'
+  }
+  if (!['round_robin', 'concurrent'].includes(taskForm.proxyMode)) {
+    taskForm.proxyMode = 'round_robin'
   }
   if (!hasRestockTaskSection.value) {
     taskForm.durationMode = 'limited'
@@ -1866,6 +1881,17 @@ function proxyGroupOptionLabel(group: ProxyGroup) {
   return `${group.name} · ${proxyGroupTypeLabel(group.type)} · ${available}`
 }
 
+function proxyModeLabel(mode: string) {
+  return mode === 'concurrent' ? '并发代理' : '循环代理'
+}
+
+function taskProxySummary(task: Pick<Task, 'proxyGroupName' | 'proxyMode'>) {
+  if (!task.proxyGroupName) {
+    return ''
+  }
+  return `代理组：${task.proxyGroupName} · ${proxyModeLabel(task.proxyMode)}`
+}
+
 function taskStatusClass(status: string) {
   if (status === 'waiting_payment' || status === 'succeeded') {
     return 'ready'
@@ -2602,17 +2628,32 @@ onUnmounted(() => {
               </el-button>
             </div>
           </el-form-item>
-          <el-form-item v-if="hasRushTaskSection" label="代理组">
-            <el-select v-model="taskForm.proxyGroupId" placeholder="不使用代理" filterable clearable>
-              <el-option :value="0" label="不使用代理" />
-              <el-option
-                v-for="group in selectableProxyGroups"
-                :key="group.id"
-                :value="group.id"
-                :label="proxyGroupOptionLabel(group)"
-              />
-            </el-select>
-          </el-form-item>
+          <section v-if="hasRushTaskSection" class="proxy-setting-section">
+            <div class="subsection-heading">
+              <h4>代理设置</h4>
+              <span>仅抢票阶段生效</span>
+            </div>
+            <el-form-item label="代理组">
+              <el-select v-model="taskForm.proxyGroupId" placeholder="不使用代理" filterable clearable @change="normalizeTaskModeFields">
+                <el-option :value="0" label="不使用代理" />
+                <el-option
+                  v-for="group in selectableProxyGroups"
+                  :key="group.id"
+                  :value="group.id"
+                  :label="proxyGroupOptionLabel(group)"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="Number(taskForm.proxyGroupId || 0) > 0" label="代理模式">
+              <el-radio-group v-model="taskForm.proxyMode">
+                <el-radio-button label="round_robin">循环代理</el-radio-button>
+                <el-radio-button label="concurrent">并发代理</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <p v-if="Number(taskForm.proxyGroupId || 0) > 0 && taskForm.proxyMode === 'concurrent'" class="field-hint">
+              每个可用代理节点启动一个抢票线程，任一线程成功后停止其他线程。
+            </p>
+          </section>
           <el-form-item required label="实名购票人">
             <div class="buyer-check-list" :class="{ disabled: ticketBuyers.length === 0 }">
               <el-checkbox-group v-model="selectedBuyerIndexes" @change="updateSelectedBuyers">
@@ -2727,7 +2768,7 @@ onUnmounted(() => {
               <div>
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
-                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
+                <small v-if="task.proxyGroupName">{{ taskProxySummary(task) }}</small>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>
@@ -2752,7 +2793,7 @@ onUnmounted(() => {
               <div>
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
-                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
+                <small v-if="task.proxyGroupName">{{ taskProxySummary(task) }}</small>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>
@@ -2781,7 +2822,7 @@ onUnmounted(() => {
               <template #default="{ row }">
                 <strong>{{ row.name }}</strong>
                 <small>模式：{{ taskModeLabel(row) }}</small>
-                <small v-if="row.proxyGroupName">代理组：{{ row.proxyGroupName }}</small>
+                <small v-if="row.proxyGroupName">{{ taskProxySummary(row) }}</small>
                 <small>{{ taskBuyerSummary(row) }}</small>
               </template>
             </el-table-column>
@@ -2828,7 +2869,7 @@ onUnmounted(() => {
               <div class="mobile-task-main">
                 <h4>{{ task.name }}</h4>
                 <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
-                <small v-if="task.proxyGroupName">代理组：{{ task.proxyGroupName }}</small>
+                <small v-if="task.proxyGroupName">{{ taskProxySummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ timeSyncSummary(task) }}</small>
                 <small>{{ lastCheckedSummary(task) }}</small>

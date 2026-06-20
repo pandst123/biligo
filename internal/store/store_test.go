@@ -162,6 +162,7 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 	for _, column := range []string{
 		"project_id",
 		"project_name",
+		"proxy_mode",
 		"screen_id",
 		"sku_id",
 		"ticket_display",
@@ -336,6 +337,36 @@ func TestProxyStoreCRUDAndTaskReference(t *testing.T) {
 	}
 	if task.ProxyGroupID != group.ID || task.ProxyGroupName != "快代理" {
 		t.Fatalf("task proxy fields = %d/%q", task.ProxyGroupID, task.ProxyGroupName)
+	}
+	if task.ProxyMode != model.ProxyModeRoundRobin {
+		t.Fatalf("default proxy mode = %q, want %q", task.ProxyMode, model.ProxyModeRoundRobin)
+	}
+	task, err = store.UpdateTask(context.Background(), task.ID, model.TaskInput{
+		Name:               task.Name,
+		AccountID:          task.AccountID,
+		ProxyGroupID:       group.ID,
+		ProxyMode:          model.ProxyModeConcurrent,
+		ProjectID:          task.ProjectID,
+		ProjectName:        task.ProjectName,
+		ScreenID:           task.ScreenID,
+		SKUID:              task.SKUID,
+		SessionName:        task.SessionName,
+		TicketLevel:        task.TicketLevel,
+		TicketDisplay:      task.TicketDisplay,
+		TicketPrice:        task.TicketPrice,
+		SaleStart:          task.SaleStart,
+		OrderType:          task.OrderType,
+		BuyerInfo:          task.BuyerInfo,
+		Buyer:              task.Buyer,
+		Tel:                task.Tel,
+		DeliverInfo:        task.DeliverInfo,
+		PollIntervalMillis: task.PollIntervalMillis,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask proxy mode: %v", err)
+	}
+	if task.ProxyMode != model.ProxyModeConcurrent {
+		t.Fatalf("proxy mode = %q, want %q", task.ProxyMode, model.ProxyModeConcurrent)
 	}
 	task, _, err = store.SetTaskRuntime(context.Background(), task.ID, model.TaskRuntimeUpdate{
 		Status:      "running",

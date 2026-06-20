@@ -396,6 +396,15 @@ p {
   border-color: #cfded3;
 }
 
+.proxy-setting-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e4ded3;
+  border-radius: 8px;
+  background: #fbf8f1;
+}
+
 .subsection-heading {
   display: flex;
   align-items: baseline;

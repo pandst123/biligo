@@ -67,6 +67,28 @@ func TestValidateTaskRequiresPurchaseConfig(t *testing.T) {
 	}
 }
 
+func TestValidateConcurrentProxyRequiresProxyGroup(t *testing.T) {
+	task := model.Task{
+		AccountID:   1,
+		ProjectID:   1001701,
+		ScreenID:    2001,
+		SKUID:       3001,
+		SaleStart:   "2026-06-13 20:00:00",
+		ProxyMode:   model.ProxyModeConcurrent,
+		BuyerInfo:   []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:       "张三",
+		Tel:         "13800000000",
+		DeliverInfo: &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+	}
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for concurrent proxy without proxy group")
+	}
+	task.ProxyGroupID = 10
+	if err := validateTask(task); err != nil {
+		t.Fatalf("validateTask returned error: %v", err)
+	}
+}
+
 func TestValidateRestockTaskRequiresSelectedTickets(t *testing.T) {
 	task := model.Task{
 		AccountID:       1,
@@ -469,6 +491,11 @@ func TestRunnerPullsAPIProxyBeforeOrderWhenSaleAlreadyStarted(t *testing.T) {
 			Protocol: model.ProxyProtocolHTTP,
 			Host:     parsedProxyURL.Hostname(),
 			Port:     proxyPort,
+		}, {
+			Name:     "API 备用节点",
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     "198.51.100.9",
+			Port:     18888,
 		}}, nil
 	}
 	t.Cleanup(func() {
@@ -514,8 +541,9 @@ func TestRunnerPullsAPIProxyBeforeOrderWhenSaleAlreadyStarted(t *testing.T) {
 	}
 	foundPullLog := false
 	for _, log := range logs {
-		if strings.Contains(log.Message, "代理 API 拉取完成，已准备代理节点") &&
-			strings.Contains(log.Message, fmt.Sprintf("%s:%d", parsedProxyURL.Hostname(), proxyPort)) {
+		if strings.Contains(log.Message, "代理 API 拉取完成，已准备 2 个代理节点") &&
+			strings.Contains(log.Message, fmt.Sprintf("%s:%d", parsedProxyURL.Hostname(), proxyPort)) &&
+			strings.Contains(log.Message, "198.51.100.9:18888") {
 			foundPullLog = true
 			break
 		}
@@ -792,6 +820,107 @@ func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 				t.Fatal("second proxy was not used after risk code")
 			}
 		})
+	}
+}
+
+func TestRunnerConcurrentProxyStopsAfterFirstSuccess(t *testing.T) {
+	var firstCreateCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected first proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer firstProxy.Close()
+	secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-CONCURRENT", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-CONCURRENT"}})
+		default:
+			t.Fatalf("unexpected second proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer secondProxy.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	groupID := createProxyGroupForRunner(t, taskStore, firstProxy.URL, secondProxy.URL)
+	task = updateTaskProxyGroupWithMode(t, taskStore, task, groupID, model.ProxyModeConcurrent)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-CONCURRENT" {
+		t.Fatalf("OrderID = %q, want ORDER-CONCURRENT", updated.OrderID)
+	}
+	if firstCreateCalls.Load() == 0 {
+		t.Fatal("first proxy worker did not start")
+	}
+	if secondCreateCalls.Load() == 0 {
+		t.Fatal("second proxy worker did not create order")
+	}
+}
+
+func TestRunnerConcurrentProxyDuplicateOrderCancelsWorkers(t *testing.T) {
+	var duplicateCalls atomic.Int32
+	firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			duplicateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 100079, "message": "duplicate"})
+		default:
+			t.Fatalf("unexpected first proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer firstProxy.Close()
+	secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected second proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer secondProxy.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	groupID := createProxyGroupForRunner(t, taskStore, firstProxy.URL, secondProxy.URL)
+	task = updateTaskProxyGroupWithMode(t, taskStore, task, groupID, model.ProxyModeConcurrent)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "duplicate_order")
+	if !strings.Contains(updated.LastMessage, "重复订单") {
+		t.Fatalf("LastMessage = %q, want duplicate order message", updated.LastMessage)
+	}
+	if duplicateCalls.Load() == 0 {
+		t.Fatal("duplicate proxy worker did not create order")
 	}
 }
 
@@ -1424,10 +1553,16 @@ func createProxyGroupForRunner(t *testing.T, taskStore *store.Store, proxyURLs .
 
 func updateTaskProxyGroup(t *testing.T, taskStore *store.Store, task model.Task, proxyGroupID int64) model.Task {
 	t.Helper()
+	return updateTaskProxyGroupWithMode(t, taskStore, task, proxyGroupID, model.ProxyModeRoundRobin)
+}
+
+func updateTaskProxyGroupWithMode(t *testing.T, taskStore *store.Store, task model.Task, proxyGroupID int64, proxyMode string) model.Task {
+	t.Helper()
 	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
 		Name:               task.Name,
 		AccountID:          task.AccountID,
 		ProxyGroupID:       proxyGroupID,
+		ProxyMode:          proxyMode,
 		ProjectID:          task.ProjectID,
 		ProjectName:        task.ProjectName,
 		ScreenID:           task.ScreenID,

@@ -21,6 +21,9 @@ const (
 	ProxyNodeSourceManual = "manual"
 	ProxyNodeSourceAPI    = "api"
 
+	ProxyModeRoundRobin = "round_robin"
+	ProxyModeConcurrent = "concurrent"
+
 	TaskModeRush    = "rush"
 	TaskModeRestock = "restock"
 	TaskModeHybrid  = "rush_restock"
@@ -287,6 +290,7 @@ type Task struct {
 	AccountName           string         `json:"accountName"`
 	ProxyGroupID          int64          `json:"proxyGroupId"`
 	ProxyGroupName        string         `json:"proxyGroupName"`
+	ProxyMode             string         `json:"proxyMode"`
 	ProjectID             int64          `json:"projectId"`
 	ProjectName           string         `json:"projectName"`
 	ScreenID              int64          `json:"screenId"`
@@ -331,6 +335,7 @@ type TaskInput struct {
 	Name                string         `json:"name"`
 	AccountID           int64          `json:"accountId"`
 	ProxyGroupID        int64          `json:"proxyGroupId"`
+	ProxyMode           string         `json:"proxyMode"`
 	ProjectID           int64          `json:"projectId"`
 	ProjectName         string         `json:"projectName"`
 	ScreenID            int64          `json:"screenId"`
@@ -438,6 +443,15 @@ func NormalizeProxyNodeSource(source string) string {
 		return ProxyNodeSourceAPI
 	default:
 		return ProxyNodeSourceManual
+	}
+}
+
+func NormalizeProxyMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ProxyModeConcurrent:
+		return ProxyModeConcurrent
+	default:
+		return ProxyModeRoundRobin
 	}
 }
 

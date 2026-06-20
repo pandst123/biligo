@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fdcs99/biligo/internal/biliticket"
@@ -266,6 +267,10 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 	deadlineExceeded := func() bool {
 		return nowWithOffset(timeOffset).After(endAt)
 	}
+	if isConcurrentProxyTask(task) {
+		m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime)
+		return
+	}
 	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, proxyRuntime)
 }
 
@@ -308,10 +313,11 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 
 	switchMessage := "抢票窗口结束，切换回流捡漏。"
 	var rushStartedAt time.Time
+	var rushStartOnce sync.Once
 	markRushStarted := func() {
-		if rushStartedAt.IsZero() {
+		rushStartOnce.Do(func() {
 			rushStartedAt = nowWithOffset(timeOffset)
-		}
+		})
 	}
 	deadlineExceeded := func() bool {
 		if rushStartedAt.IsZero() {
@@ -319,7 +325,13 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 		}
 		return !nowWithOffset(timeOffset).Before(rushStartedAt.Add(rushDuration))
 	}
-	if m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime) {
+	var finished bool
+	if isConcurrentProxyTask(task) {
+		finished = m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime)
+	} else {
+		finished = m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime)
+	}
+	if finished {
 		return
 	}
 	if ctx.Err() != nil {
@@ -495,19 +507,249 @@ orderLoop:
 		if !ok {
 			return false
 		}
-		task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
-			Status:                "waiting_payment",
-			LastMessage:           "订单创建成功，请尽快完成支付。",
-			OrderID:               result.OrderID,
-			PaymentURL:            payParam.CodeURL,
-			PaymentQRImageDataURL: payParam.QRImageDataURL,
-			LastCheckedAt:         checkedAtText(),
-		}, "info")
-		if err == nil {
-			m.publishTaskAndLog(task, log)
-			m.notifyTaskSuccess(task)
-		}
+		m.completeOrderSuccess(taskID, result.OrderID, payParam, checkedAtText())
 		return true
+	}
+}
+
+func (m *Manager) completeOrderSuccess(taskID int64, orderID string, payParam biliticket.PayParamResult, checkedAt string) (model.Task, bool) {
+	task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
+		Status:                "waiting_payment",
+		LastMessage:           "订单创建成功，请尽快完成支付。",
+		OrderID:               orderID,
+		PaymentURL:            payParam.CodeURL,
+		PaymentQRImageDataURL: payParam.QRImageDataURL,
+		LastCheckedAt:         checkedAt,
+	}, "info")
+	if err != nil {
+		return model.Task{}, false
+	}
+	m.publishTaskAndLog(task, log)
+	m.notifyTaskSuccess(task)
+	return task, true
+}
+
+func (m *Manager) runConcurrentOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime) bool {
+	if proxyRuntime == nil {
+		return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, nil)
+	}
+	if err := proxyRuntime.ensureReady(ctx); err != nil {
+		m.setRuntime(taskID, "failed", "代理组无可用节点："+err.Error(), "error")
+		return false
+	}
+	nodes := append([]model.ProxyNode(nil), proxyRuntime.nodes...)
+	if len(nodes) == 0 {
+		m.setRuntime(taskID, "failed", "代理组无可用节点：代理组没有节点", "error")
+		return false
+	}
+
+	m.setRuntime(taskID, "running", fmt.Sprintf("并发代理已启动 %d 个抢票线程。", len(nodes)), "info")
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var finishOnce sync.Once
+	var stateMu sync.Mutex
+	var terminal atomic.Bool
+	var finished bool
+	var success bool
+
+	finishTerminal := func(status string, message string, level string) {
+		finishOnce.Do(func() {
+			stateMu.Lock()
+			defer stateMu.Unlock()
+			terminal.Store(true)
+			finished = true
+			m.setRuntime(taskID, status, message, level)
+			cancel()
+		})
+	}
+	finishSuccess := func(orderID string, payParam biliticket.PayParamResult, checkedAt string) {
+		finishOnce.Do(func() {
+			stateMu.Lock()
+			defer stateMu.Unlock()
+			terminal.Store(true)
+			if _, ok := m.completeOrderSuccess(taskID, orderID, payParam, checkedAt); ok {
+				success = true
+			}
+			finished = true
+			cancel()
+		})
+	}
+	setWorkerRuntime := func(message string, level string, checkedAt string) bool {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if terminal.Load() {
+			return false
+		}
+		m.setRuntimeWithCheckedAt(taskID, "running", message, level, checkedAt)
+		return true
+	}
+
+	workerCount := 0
+	for _, node := range nodes {
+		node := node
+		runtime, err := m.fixedProxyRuntimeForNode(taskID, proxyRuntime.group, node)
+		if err != nil {
+			m.setRuntime(taskID, "running", fmt.Sprintf("代理节点 %s 初始化失败：%s", proxyNodeLabel(node), err.Error()), "warn")
+			continue
+		}
+		workerCount++
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.runConcurrentProxyWorker(workerCtx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, runtime, terminal.Load, setWorkerRuntime, finishTerminal, finishSuccess)
+		}()
+	}
+
+	if workerCount == 0 {
+		m.setRuntime(taskID, "failed", "代理组无可用节点：代理节点初始化失败", "error")
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		cancel()
+		<-done
+	}
+	if finished {
+		return success
+	}
+	return false
+}
+
+func (m *Manager) fixedProxyRuntimeForNode(taskID int64, group model.ProxyGroup, node model.ProxyNode) (*taskProxyRuntime, error) {
+	client, err := proxynet.NewHTTPClient(node)
+	if err != nil {
+		return nil, err
+	}
+	return &taskProxyRuntime{
+		manager: m,
+		taskID:  taskID,
+		group:   group,
+		nodes:   []model.ProxyNode{node},
+		index:   0,
+		client:  m.ticket.WithHTTPClient(client),
+		fixed:   true,
+	}, nil
+}
+
+func (m *Manager) runConcurrentProxyWorker(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string), finishSuccess func(string, biliticket.PayParamResult, string)) {
+	node := proxyRuntime.currentNode()
+	prefix := "代理节点 " + proxyNodeLabel(node) + "："
+prepareLoop:
+	for {
+		if ctx.Err() != nil || terminalReached() {
+			return
+		}
+		if deadlineExceeded != nil && deadlineExceeded() {
+			finishTerminal(deadlineStatus, deadlineMessage, deadlineLevel)
+			return
+		}
+
+		latestTask, err := m.store.GetTask(context.Background(), taskID)
+		if err != nil {
+			return
+		}
+		checkedAt := checkedAtText()
+
+		if beforeAttempt != nil {
+			beforeAttempt()
+		}
+		client := m.ticketClient(proxyRuntime)
+		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
+		if err != nil {
+			if !m.retryConcurrentRunError(ctx, formatRetryMessage(prefix+"订单准备失败："+err.Error()), checkedAt, interval, terminalReached, setWorkerRuntime) {
+				return
+			}
+			continue
+		}
+
+		var result biliticket.OrderCreateResult
+		var createErr error
+		createFailedMessage := ""
+		for createAttempt := 1; createAttempt <= createOrderAttemptsPerPrepare; createAttempt++ {
+			if ctx.Err() != nil || terminalReached() {
+				return
+			}
+			if deadlineExceeded != nil && deadlineExceeded() {
+				finishTerminal(deadlineStatus, deadlineMessage, deadlineLevel)
+				return
+			}
+
+			result, createErr = client.CreateOrder(ctx, latestTask, cookie, prepared)
+			if createErr != nil {
+				if result.Code == 100079 {
+					finishTerminal("duplicate_order", prefix+"存在重复订单，已停止。", "warn")
+					return
+				}
+				if result.Code == 100034 && result.PayMoney > 0 {
+					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+					continue prepareLoop
+				}
+				createFailedMessage = prefix + "创建订单失败：" + createErr.Error()
+				continue
+			}
+			if result.Code == 100079 {
+				finishTerminal("duplicate_order", prefix+"存在重复订单，已停止。", "warn")
+				return
+			}
+			if result.OrderID == "" {
+				createFailedMessage = prefix + "订单接口返回成功，但未返回订单 ID"
+				continue
+			}
+			break
+		}
+		if createErr != nil || result.OrderID == "" {
+			if createFailedMessage == "" {
+				createFailedMessage = prefix + "创建订单失败：未知错误"
+			}
+			if !m.retryConcurrentRunError(ctx, formatRetryMessage(createFailedMessage), checkedAt, interval, terminalReached, setWorkerRuntime) {
+				return
+			}
+			continue
+		}
+
+		payParam, ok := m.waitForConcurrentPayParam(ctx, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime, prefix, terminalReached, setWorkerRuntime, finishTerminal)
+		if !ok {
+			return
+		}
+		finishSuccess(result.OrderID, payParam, checkedAtText())
+		return
+	}
+}
+
+func (m *Manager) retryConcurrentRunError(ctx context.Context, message string, checkedAt string, interval time.Duration, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool) bool {
+	if ctx.Err() != nil || terminalReached() {
+		return false
+	}
+	if !setWorkerRuntime(message, "warn", checkedAt) {
+		return false
+	}
+	return m.wait(ctx, interval)
+}
+
+func (m *Manager) waitForConcurrentPayParam(ctx context.Context, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime, prefix string, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string)) (biliticket.PayParamResult, bool) {
+	for {
+		if ctx.Err() != nil || terminalReached() {
+			return biliticket.PayParamResult{}, false
+		}
+		if deadlineExceeded != nil && deadlineExceeded() {
+			finishTerminal(deadlineStatus, deadlineMessage, deadlineLevel)
+			return biliticket.PayParamResult{}, false
+		}
+		payParam, err := m.ticketClient(proxyRuntime).GetPayParam(ctx, orderID, cookie)
+		if err == nil {
+			return payParam, true
+		}
+		if !m.retryConcurrentRunError(ctx, formatRetryMessage(prefix+"订单创建成功，但获取支付二维码失败："+err.Error()), checkedAtText(), interval, terminalReached, setWorkerRuntime) {
+			return biliticket.PayParamResult{}, false
+		}
 	}
 }
 
@@ -636,6 +878,14 @@ type taskProxyRuntime struct {
 	client  *biliticket.Client
 	pulled  bool
 	triedAt time.Time
+	fixed   bool
+}
+
+func isConcurrentProxyTask(task model.Task) bool {
+	taskMode := model.NormalizeTaskMode(task.TaskMode)
+	return task.ProxyGroupID > 0 &&
+		model.NormalizeProxyMode(task.ProxyMode) == model.ProxyModeConcurrent &&
+		(taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid)
 }
 
 func (m *Manager) newTaskProxyRuntime(ctx context.Context, taskID int64, task model.Task) (*taskProxyRuntime, error) {
@@ -730,7 +980,7 @@ func (p *taskProxyRuntime) ensureReady(ctx context.Context) error {
 		if err := p.pullAndActivate(ctx); err != nil {
 			return err
 		}
-		p.manager.setRuntime(p.taskID, "waiting_start", proxyAPIReadyMessage(p.currentNode()), "info")
+		p.manager.setRuntime(p.taskID, "waiting_start", proxyAPIReadyMessage(p.nodes), "info")
 		return nil
 	}
 	if err := p.reloadNodes(ctx); err != nil {
@@ -792,6 +1042,9 @@ func (p *taskProxyRuntime) switchNext(ctx context.Context, reason string) error 
 	if p == nil {
 		return errors.New("任务未启用代理组")
 	}
+	if p.fixed {
+		return errors.New("并发代理线程固定使用当前节点")
+	}
 	if len(p.nodes) < 2 {
 		return errors.New("代理组没有可切换的下一个节点")
 	}
@@ -848,6 +1101,9 @@ func (m *Manager) switchProxy(ctx context.Context, taskID int64, proxyRuntime *t
 	if proxyRuntime == nil {
 		return false
 	}
+	if proxyRuntime.fixed {
+		return false
+	}
 	if err := proxyRuntime.switchNext(ctx, reason); err != nil {
 		m.setRuntime(taskID, "running", "代理切换失败："+err.Error()+"，继续使用当前节点重试。", "warn")
 		return false
@@ -875,8 +1131,15 @@ func proxyNodeAddress(node model.ProxyNode) string {
 	return "未知地址"
 }
 
-func proxyAPIReadyMessage(node model.ProxyNode) string {
-	return fmt.Sprintf("代理 API 拉取完成，已准备代理节点 %s。", proxyNodeAddress(node))
+func proxyAPIReadyMessage(nodes []model.ProxyNode) string {
+	if len(nodes) == 0 {
+		return "代理 API 拉取完成，但未准备代理节点。"
+	}
+	labels := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		labels = append(labels, proxyNodeAddress(node))
+	}
+	return fmt.Sprintf("代理 API 拉取完成，已准备 %d 个代理节点：%s。", len(nodes), strings.Join(labels, "、"))
 }
 
 func (m *Manager) retryRunError(ctx context.Context, taskID int64, message string, checkedAt string, interval time.Duration) bool {
@@ -1000,7 +1263,7 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 			if err := proxyRuntime.pullAndActivate(ctx); err != nil {
 				m.setRuntime(taskID, "waiting_start", "代理 API 拉取失败："+err.Error(), "warn")
 			} else {
-				m.setRuntime(taskID, "waiting_start", proxyAPIReadyMessage(proxyRuntime.currentNode()), "info")
+				m.setRuntime(taskID, "waiting_start", proxyAPIReadyMessage(proxyRuntime.nodes), "info")
 			}
 		}
 		if !warmedUp && remaining <= saleStartWarmupBefore {
@@ -1152,6 +1415,9 @@ func validateTask(task model.Task) error {
 	durationMode := model.NormalizeDurationMode(task.DurationMode)
 	hasRushStage := taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid
 	hasRestockStage := taskMode == model.TaskModeRestock || taskMode == model.TaskModeHybrid
+	if hasRushStage && model.NormalizeProxyMode(task.ProxyMode) == model.ProxyModeConcurrent && task.ProxyGroupID <= 0 {
+		return errors.New("并发代理需要选择代理组")
+	}
 	if hasRestockStage && len(task.SelectedTickets) == 0 {
 		return errors.New("回流蹲票模式请至少选择一个票种")
 	}
