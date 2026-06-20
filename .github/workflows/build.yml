@@ -171,9 +171,10 @@ jobs:
           if-no-files-found: error
 
       - name: Upload Release Asset
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' && github.event.release.tag_name != ''
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: ${{ steps.package.outputs.asset_path }}
 
   docker-image:
@@ -221,7 +222,7 @@ jobs:
             fdcs99/biligo
             crpi-rlahqzawqg2sd5in.cn-hangzhou.personal.cr.aliyuncs.com/fdcs99/biligo
           tags: |
-            type=ref,event=tag
+            type=raw,value=${{ github.event.release.tag_name }}
             type=raw,value=latest
 
       - name: Build And Push Docker Image
