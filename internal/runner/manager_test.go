@@ -1643,13 +1643,13 @@ func TestRunnerRetriesPayParamErrorsWithoutRecreatingOrder(t *testing.T) {
 }
 
 func TestRestockModeChecksTicketStatusBeforeOrderFlow(t *testing.T) {
-	var statusCalls atomic.Int32
+	var infoCalls atomic.Int32
 	var prepareCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			statusCalls.Add(1)
+			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayload(true))
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
@@ -1684,7 +1684,7 @@ func TestRestockModeChecksTicketStatusBeforeOrderFlow(t *testing.T) {
 	if updated.OrderID != "ORDER-1" {
 		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
 	}
-	if statusCalls.Load() == 0 {
+	if infoCalls.Load() == 0 {
 		t.Fatal("ticket status was not checked")
 	}
 	if prepareCalls.Load() == 0 {
@@ -1740,6 +1740,7 @@ func TestRestockModeUsesFirstClickableSelectedTicketFromLatestProjectOrder(t *te
 
 func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T) {
 	var infoCalls atomic.Int32
+	var prepareCalls atomic.Int32
 	var createCalls atomic.Int32
 	var mu sync.Mutex
 	createSKUs := make([]int64, 0)
@@ -1747,7 +1748,8 @@ func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			if infoCalls.Add(1) == 1 {
+			call := infoCalls.Add(1)
+			if call == 1 {
 				writeRunnerJSON(t, w, multiTicketDetailPayload(false, true, false))
 				return
 			}
@@ -1755,13 +1757,14 @@ func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
 		case "/api/ticket/order/createV2":
 			payload := decodeRunnerJSONBody(t, r)
 			mu.Lock()
 			createSKUs = append(createSKUs, int64FromBody(payload["sku_id"]))
 			mu.Unlock()
-			if createCalls.Add(1) <= createOrderAttemptsPerPrepare {
+			if createCalls.Add(1) <= restockCreateAttemptsAfterDetection {
 				writeRunnerJSON(t, w, map[string]any{"code": 100009, "message": "stock not enough"})
 				return
 			}
@@ -1789,18 +1792,22 @@ func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T
 	if updated.OrderID != "ORDER-2" {
 		t.Fatalf("OrderID = %q, want ORDER-2", updated.OrderID)
 	}
+	wantPrepareCalls := (restockCreateAttemptsAfterDetection+createOrderAttemptsPerPrepare-1)/createOrderAttemptsPerPrepare + 1
+	if prepareCalls.Load() != int32(wantPrepareCalls) {
+		t.Fatalf("prepare calls = %d, want %d", prepareCalls.Load(), wantPrepareCalls)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(createSKUs) < createOrderAttemptsPerPrepare+1 {
-		t.Fatalf("create skus = %#v, want at least %d calls", createSKUs, createOrderAttemptsPerPrepare+1)
+	if len(createSKUs) < restockCreateAttemptsAfterDetection+1 {
+		t.Fatalf("create skus = %#v, want at least %d calls", createSKUs, restockCreateAttemptsAfterDetection+1)
 	}
-	for index := 0; index < createOrderAttemptsPerPrepare; index++ {
+	for index := 0; index < restockCreateAttemptsAfterDetection; index++ {
 		if createSKUs[index] != 3002 {
-			t.Fatalf("create skus = %#v, want first %d calls use 3002", createSKUs, createOrderAttemptsPerPrepare)
+			t.Fatalf("create skus = %#v, want first %d calls use 3002", createSKUs, restockCreateAttemptsAfterDetection)
 		}
 	}
-	if createSKUs[createOrderAttemptsPerPrepare] != 3003 {
-		t.Fatalf("create skus = %#v, want call %d use 3003", createSKUs, createOrderAttemptsPerPrepare+1)
+	if createSKUs[restockCreateAttemptsAfterDetection] != 3003 {
+		t.Fatalf("create skus = %#v, want call %d use 3003", createSKUs, restockCreateAttemptsAfterDetection+1)
 	}
 }
 
@@ -1852,7 +1859,7 @@ func TestRestockModeRepreparesAfterCreateV2PriceChange(t *testing.T) {
 		t.Fatalf("PayMoney = %d, want 69000", updated.PayMoney)
 	}
 	if infoCalls.Load() != 1 {
-		t.Fatalf("ticket info calls = %d, want 1", infoCalls.Load())
+		t.Fatalf("project info calls = %d, want 1", infoCalls.Load())
 	}
 	if prepareCalls.Load() != 2 {
 		t.Fatalf("prepare calls = %d, want 2", prepareCalls.Load())
@@ -1863,13 +1870,13 @@ func TestRestockModeRepreparesAfterCreateV2PriceChange(t *testing.T) {
 }
 
 func TestRestockModeDoesNotCreateOrderWhenTicketUnavailable(t *testing.T) {
-	var statusCalls atomic.Int32
+	var infoCalls atomic.Int32
 	var prepareCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			statusCalls.Add(1)
+			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayload(false))
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
@@ -1890,7 +1897,7 @@ func TestRestockModeDoesNotCreateOrderWhenTicketUnavailable(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	updated := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
-		return statusCalls.Load() >= 2 && task.Status == "running" && task.LastCheckedAt != ""
+		return infoCalls.Load() >= 2 && task.Status == "running" && task.LastCheckedAt != ""
 	})
 	if updated.Status != "running" {
 		t.Fatalf("Status = %q, want running", updated.Status)
@@ -1902,12 +1909,12 @@ func TestRestockModeDoesNotCreateOrderWhenTicketUnavailable(t *testing.T) {
 }
 
 func TestRestockModeLogsRepeatedStatusChecks(t *testing.T) {
-	var statusCalls atomic.Int32
+	var infoCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			statusCalls.Add(1)
+			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayload(false))
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
@@ -1933,7 +1940,7 @@ func TestRestockModeLogsRepeatedStatusChecks(t *testing.T) {
 	firstCheckedAt := first.LastCheckedAt
 
 	updated := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
-		return statusCalls.Load() >= 3 &&
+		return infoCalls.Load() >= 3 &&
 			task.LastMessage == expectedMessage &&
 			task.LastCheckedAt != "" &&
 			task.LastCheckedAt != firstCheckedAt
@@ -1994,12 +2001,12 @@ func TestRestockUnlimitedModeAllowsEmptyEndTime(t *testing.T) {
 }
 
 func TestHybridModeRushSuccessDoesNotEnterRestock(t *testing.T) {
-	var statusCalls atomic.Int32
+	var infoCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			statusCalls.Add(1)
+			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayload(true))
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
@@ -2027,8 +2034,8 @@ func TestHybridModeRushSuccessDoesNotEnterRestock(t *testing.T) {
 	if updated.OrderID != "ORDER-HYBRID-RUSH" {
 		t.Fatalf("OrderID = %q, want ORDER-HYBRID-RUSH", updated.OrderID)
 	}
-	if statusCalls.Load() != 0 {
-		t.Fatalf("restock status calls = %d, want 0", statusCalls.Load())
+	if infoCalls.Load() != 0 {
+		t.Fatalf("restock ticket info calls = %d, want 0", infoCalls.Load())
 	}
 }
 

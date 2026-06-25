@@ -38,16 +38,17 @@ type Manager struct {
 }
 
 const (
-	saleStartWaitTick             = time.Millisecond * 50 // 等待 50 ms
-	saleStartWaitReportInterval   = time.Second
-	hotProjectCheckBefore         = 5 * time.Minute
-	hotProjectCheckAttempts       = 10
-	hotProjectCheckRetryInterval  = 100 * time.Millisecond
-	saleStartWarmupBefore         = 30 * time.Second
-	saleStartWarmupRequestCount   = 5
-	defaultProxyAPIPullBefore     = 5 * time.Minute
-	proxyAPIPullMaxAttempts       = 3
-	createOrderAttemptsPerPrepare = 4
+	saleStartWaitTick                   = time.Millisecond * 50 // 等待 50 ms
+	saleStartWaitReportInterval         = time.Second
+	hotProjectCheckBefore               = 5 * time.Minute
+	hotProjectCheckAttempts             = 10
+	hotProjectCheckRetryInterval        = 100 * time.Millisecond
+	saleStartWarmupBefore               = 30 * time.Second
+	saleStartWarmupRequestCount         = 5
+	defaultProxyAPIPullBefore           = 5 * time.Minute
+	proxyAPIPullMaxAttempts             = 3
+	createOrderAttemptsPerPrepare       = 4
+	restockCreateAttemptsAfterDetection = 20
 )
 
 var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
@@ -394,7 +395,7 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 				m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("更新命中票种失败："+err.Error()), "warn", checkedAt)
 			} else {
 				m.publishTaskAndLog(matchedTask, log)
-				switch m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded, nil) {
+				switch m.runRestockOrderAttempt(ctx, taskID, cookie, deadlineExceeded, nil) {
 				case orderAttemptFinished, orderAttemptStopped:
 					return
 				}
@@ -770,11 +771,24 @@ const (
 	orderAttemptStopped
 )
 
-func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) orderAttemptResult {
+func (m *Manager) runRestockOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) orderAttemptResult {
+	return m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded, proxyRuntime, restockCreateAttemptsAfterDetection)
+}
+
+func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime, maxCreateAttempts int) orderAttemptResult {
+	if maxCreateAttempts <= 0 {
+		maxCreateAttempts = createOrderAttemptsPerPrepare
+	}
+	totalCreateAttempts := 0
+
 prepareLoop:
 	for {
 		if ctx.Err() != nil {
 			return orderAttemptStopped
+		}
+		if totalCreateAttempts >= maxCreateAttempts {
+			m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage(fmt.Sprintf("已连续尝试 %d 次下单仍未成功", maxCreateAttempts)), "warn", checkedAtText())
+			return orderAttemptRetryDetection
 		}
 		if deadlineExceeded != nil && deadlineExceeded() {
 			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
@@ -801,12 +815,16 @@ prepareLoop:
 			if ctx.Err() != nil {
 				return orderAttemptStopped
 			}
+			if totalCreateAttempts >= maxCreateAttempts {
+				break
+			}
 			if deadlineExceeded != nil && deadlineExceeded() {
 				m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
 				return orderAttemptStopped
 			}
 
 			result, createErr = client.CreateOrder(ctx, latestTask, cookie, prepared)
+			totalCreateAttempts++
 			if createErr != nil {
 				if result.Code == 100079 {
 					m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
@@ -858,8 +876,12 @@ prepareLoop:
 			if createFailedMessage == "" {
 				createFailedMessage = "创建订单失败：未知错误"
 			}
-			m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage(createFailedMessage), "warn", checkedAt)
-			return orderAttemptRetryDetection
+			if totalCreateAttempts >= maxCreateAttempts {
+				m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage(fmt.Sprintf("已连续尝试 %d 次下单仍未成功", maxCreateAttempts)), "warn", checkedAt)
+				return orderAttemptRetryDetection
+			}
+			m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage(createFailedMessage), "warn", checkedAt)
+			continue prepareLoop
 		}
 	}
 }
