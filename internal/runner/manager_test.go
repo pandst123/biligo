@@ -1188,6 +1188,79 @@ func TestRunnerSuperModeSwitchesBaseURLOnCreateRiskCode(t *testing.T) {
 	}
 }
 
+func TestRunnerSuperModeStartsWithPreferredBaseURLAndSwitchesNext(t *testing.T) {
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("first supermode server should not be used when preferred base is selected: %s", r.URL.Path)
+	}))
+	defer firstServer.Close()
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("second supermode server should not be used when preferred base is selected: %s", r.URL.Path)
+	}))
+	defer secondServer.Close()
+	var thirdPrepareCalls atomic.Int32
+	var thirdCreateCalls atomic.Int32
+	thirdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			thirdPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-third"}})
+		case "/api/ticket/order/createV2":
+			thirdCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected preferred supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer thirdServer.Close()
+	var fourthPrepareCalls atomic.Int32
+	var fourthCreateCalls atomic.Int32
+	var fourthPayParamCalls atomic.Int32
+	fourthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			fourthPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-fourth"}})
+		case "/api/ticket/order/createV2":
+			fourthCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-PREFERRED-SUPER", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			fourthPayParamCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-PREFERRED-SUPER"}})
+		default:
+			t.Fatalf("unexpected switched preferred supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer fourthServer.Close()
+
+	originalBaseURLs := superModeBaseURLs
+	superModeBaseURLs = []string{firstServer.URL, secondServer.URL, thirdServer.URL, fourthServer.URL}
+	t.Cleanup(func() {
+		superModeBaseURLs = originalBaseURLs
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	task = updateTaskSuperModeBase(t, taskStore, task, true, model.SuperModeBaseBiligo)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(firstServer.Client(), firstServer.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-PREFERRED-SUPER" {
+		t.Fatalf("OrderID = %q, want ORDER-PREFERRED-SUPER", updated.OrderID)
+	}
+	if thirdPrepareCalls.Load() != 1 || thirdCreateCalls.Load() != 1 {
+		t.Fatalf("third server calls prepare/create = %d/%d, want 1/1", thirdPrepareCalls.Load(), thirdCreateCalls.Load())
+	}
+	if fourthPrepareCalls.Load() != 1 || fourthCreateCalls.Load() != 1 || fourthPayParamCalls.Load() != 1 {
+		t.Fatalf("fourth server calls prepare/create/payParam = %d/%d/%d, want 1/1/1", fourthPrepareCalls.Load(), fourthCreateCalls.Load(), fourthPayParamCalls.Load())
+	}
+}
+
 func TestRunnerSuperModeSwitchesBaseURLOnCreateHTTP412(t *testing.T) {
 	var firstPrepareCalls atomic.Int32
 	var firstCreateCalls atomic.Int32
@@ -2262,12 +2335,18 @@ func updateTaskProxyGroup(t *testing.T, taskStore *store.Store, task model.Task,
 
 func updateTaskSuperMode(t *testing.T, taskStore *store.Store, task model.Task, superMode bool) model.Task {
 	t.Helper()
+	return updateTaskSuperModeBase(t, taskStore, task, superMode, task.SuperModeBase)
+}
+
+func updateTaskSuperModeBase(t *testing.T, taskStore *store.Store, task model.Task, superMode bool, superModeBase string) model.Task {
+	t.Helper()
 	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
 		Name:                      task.Name,
 		AccountID:                 task.AccountID,
 		ProxyGroupID:              task.ProxyGroupID,
 		ProxyMode:                 task.ProxyMode,
 		SuperMode:                 superMode,
+		SuperModeBase:             superModeBase,
 		ProjectID:                 task.ProjectID,
 		ProjectName:               task.ProjectName,
 		ScreenID:                  task.ScreenID,
@@ -2312,6 +2391,7 @@ func updateTaskProxyGroupWithMode(t *testing.T, taskStore *store.Store, task mod
 		ProxyGroupID:              proxyGroupID,
 		ProxyMode:                 proxyMode,
 		SuperMode:                 task.SuperMode,
+		SuperModeBase:             task.SuperModeBase,
 		ProjectID:                 task.ProjectID,
 		ProjectName:               task.ProjectName,
 		ScreenID:                  task.ScreenID,

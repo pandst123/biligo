@@ -27,6 +27,11 @@ const (
 	ProxyModeRoundRobin = "round_robin"
 	ProxyModeConcurrent = "concurrent"
 
+	SuperModeBaseShow       = "show"
+	SuperModeBaseBilibiliCN = "bilibili_cn"
+	SuperModeBaseBiligo     = "biligo"
+	SuperModeBaseMeBilibili = "me_bilibili"
+
 	TaskModeRush    = "rush"
 	TaskModeRestock = "restock"
 	TaskModeHybrid  = "rush_restock"
@@ -322,6 +327,7 @@ type Task struct {
 	ProxyGroupName            string         `json:"proxyGroupName"`
 	ProxyMode                 string         `json:"proxyMode"`
 	SuperMode                 bool           `json:"superMode"`
+	SuperModeBase             string         `json:"superModeBase"`
 	ProjectID                 int64          `json:"projectId"`
 	ProjectName               string         `json:"projectName"`
 	ScreenID                  int64          `json:"screenId"`
@@ -370,6 +376,7 @@ type TaskInput struct {
 	ProxyGroupID              int64          `json:"proxyGroupId"`
 	ProxyMode                 string         `json:"proxyMode"`
 	SuperMode                 bool           `json:"superMode"`
+	SuperModeBase             string         `json:"superModeBase"`
 	ProjectID                 int64          `json:"projectId"`
 	ProjectName               string         `json:"projectName"`
 	ScreenID                  int64          `json:"screenId"`
@@ -508,6 +515,21 @@ func NormalizeProxyMode(mode string) string {
 		return ProxyModeConcurrent
 	default:
 		return ProxyModeRoundRobin
+	}
+}
+
+func NormalizeSuperModeBase(base string) string {
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case SuperModeBaseBilibiliCN:
+		return SuperModeBaseBilibiliCN
+	case SuperModeBaseBiligo:
+		return SuperModeBaseBiligo
+	case SuperModeBaseMeBilibili:
+		return SuperModeBaseMeBilibili
+	case SuperModeBaseShow:
+		return SuperModeBaseShow
+	default:
+		return ""
 	}
 }
 

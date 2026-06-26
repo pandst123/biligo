@@ -59,6 +59,12 @@ var superModeBaseURLs = []string{
 	"https://www.biligo.com",
 	"http://me.bilibili.cc",
 }
+var superModeBaseKeys = []string{
+	model.SuperModeBaseShow,
+	model.SuperModeBaseBilibiliCN,
+	model.SuperModeBaseBiligo,
+	model.SuperModeBaseMeBilibili,
+}
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
 	return NewManagerWithTimeSync(store, ticket, hub, timesync.NewClient(nil))
@@ -944,7 +950,20 @@ func newSuperModeRuntime(task model.Task) *superModeRuntime {
 	if len(baseURLs) < 2 {
 		return nil
 	}
-	return &superModeRuntime{baseURLs: baseURLs}
+	return &superModeRuntime{baseURLs: baseURLs, index: superModeInitialIndex(task.SuperModeBase, len(baseURLs))}
+}
+
+func superModeInitialIndex(base string, baseURLCount int) int {
+	base = model.NormalizeSuperModeBase(base)
+	if base == "" {
+		return 0
+	}
+	for index, key := range superModeBaseKeys {
+		if key == base && index < baseURLCount {
+			return index
+		}
+	}
+	return 0
 }
 
 func (r *superModeRuntime) clone() *superModeRuntime {

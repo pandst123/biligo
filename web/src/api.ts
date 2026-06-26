@@ -275,6 +275,7 @@ export interface Task {
   proxyGroupName: string
   proxyMode: string
   superMode: boolean
+  superModeBase: string
   projectId: number
   projectName: string
   screenId: number
@@ -323,6 +324,7 @@ export interface TaskInput {
   proxyGroupId: number
   proxyMode: string
   superMode: boolean
+  superModeBase: string
   projectId: number
   projectName: string
   screenId: number

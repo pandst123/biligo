@@ -125,6 +125,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			proxy_group_id INTEGER NOT NULL DEFAULT 0,
 			proxy_mode TEXT NOT NULL DEFAULT 'round_robin',
 			super_mode INTEGER NOT NULL DEFAULT 0,
+			super_mode_base TEXT NOT NULL DEFAULT '',
 			project_id INTEGER NOT NULL DEFAULT 0,
 			project_name TEXT NOT NULL DEFAULT '',
 			screen_id INTEGER NOT NULL DEFAULT 0,
@@ -187,6 +188,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "tasks", "super_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "super_mode_base", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "tasks", "rush_poll_interval_ms", "INTEGER NOT NULL DEFAULT 1000"); err != nil {
@@ -858,7 +862,7 @@ func (s *Store) ClearProxyGroupTestResult(ctx context.Context, id int64) (model.
 func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode, t.super_mode,
+			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode, t.super_mode, t.super_mode_base,
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
 				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
@@ -908,7 +912,7 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tasks (
-			name, account_id, proxy_group_id, proxy_mode, super_mode, project_id, project_name, screen_id, sku_id,
+			name, account_id, proxy_group_id, proxy_mode, super_mode, super_mode_base, project_id, project_name, screen_id, sku_id,
 				session_name, ticket_level, ticket_display, ticket_price,
 				sale_start, sale_status, link_id, is_hot_project,
 				task_mode, duration_mode, selected_tickets, rush_duration_seconds,
@@ -917,8 +921,8 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 			quantity, start_at, end_at, poll_interval_ms, rush_poll_interval_ms, restock_poll_interval_ms,
 			status, last_message, created_at, updated_at
 		)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, boolToInt(input.SuperMode), input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, now)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
+		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, boolToInt(input.SuperMode), input.SuperModeBase, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -937,7 +941,7 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 	var task model.Task
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
-			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode, t.super_mode,
+			t.id, t.name, t.account_id, COALESCE(a.name, ''), t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode, t.super_mode, t.super_mode_base,
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
 				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
@@ -974,7 +978,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE tasks
-		SET name = ?, account_id = ?, proxy_group_id = ?, proxy_mode = ?, super_mode = ?, project_id = ?, project_name = ?, screen_id = ?, sku_id = ?,
+		SET name = ?, account_id = ?, proxy_group_id = ?, proxy_mode = ?, super_mode = ?, super_mode_base = ?, project_id = ?, project_name = ?, screen_id = ?, sku_id = ?,
 			session_name = ?, ticket_level = ?, ticket_display = ?, ticket_price = ?,
 			sale_start = ?, sale_status = ?, link_id = ?, is_hot_project = ?,
 			task_mode = ?, duration_mode = ?, selected_tickets = ?, rush_duration_seconds = ?,
@@ -982,7 +986,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 			time_sync_strategy = ?,
 			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, rush_poll_interval_ms = ?, restock_poll_interval_ms = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, boolToInt(input.SuperMode), input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, boolToInt(input.SuperMode), input.SuperModeBase, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.RushDurationSeconds, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, input.RushPollIntervalMillis, input.RestockPollIntervalMillis, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -1437,6 +1441,7 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&task.ProxyGroupName,
 		&task.ProxyMode,
 		&superMode,
+		&task.SuperModeBase,
 		&task.ProjectID,
 		&task.ProjectName,
 		&task.ScreenID,
@@ -1481,6 +1486,10 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		return err
 	}
 	task.SuperMode = superMode != 0
+	task.SuperModeBase = model.NormalizeSuperModeBase(task.SuperModeBase)
+	if task.SuperModeBase == "" {
+		task.SuperModeBase = model.SuperModeBaseShow
+	}
 	task.IsHotProject = isHotProject != 0
 	task.ProxyMode = model.NormalizeProxyMode(task.ProxyMode)
 	task.TaskMode = model.NormalizeTaskMode(task.TaskMode)
@@ -1523,6 +1532,7 @@ func boolToInt(value bool) int {
 func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	input.TimeSyncStrategy = model.NormalizeTimeSyncStrategy(input.TimeSyncStrategy)
 	input.ProxyMode = model.NormalizeProxyMode(input.ProxyMode)
+	input.SuperModeBase = model.NormalizeSuperModeBase(input.SuperModeBase)
 	input.TaskMode = model.NormalizeTaskMode(input.TaskMode)
 	input.DurationMode = model.NormalizeDurationMode(input.DurationMode)
 	if input.TaskMode == model.TaskModeRestock {

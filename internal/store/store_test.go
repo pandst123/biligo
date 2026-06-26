@@ -79,6 +79,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.SuperMode {
 		t.Fatal("SuperMode = true, want default false")
 	}
+	if task.SuperModeBase != model.SuperModeBaseShow {
+		t.Fatalf("SuperModeBase = %q, want %q", task.SuperModeBase, model.SuperModeBaseShow)
+	}
 	if task.PollIntervalMillis != 200 {
 		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
 	}
@@ -102,6 +105,7 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		LinkID:                    task.LinkID,
 		IsHotProject:              task.IsHotProject,
 		SuperMode:                 true,
+		SuperModeBase:             model.SuperModeBaseBiligo,
 		TaskMode:                  model.TaskModeHybrid,
 		DurationMode:              model.DurationModeUnlimited,
 		SelectedTickets:           task.SelectedTickets,
@@ -130,6 +134,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if !task.SuperMode {
 		t.Fatal("updated SuperMode = false, want true")
 	}
+	if task.SuperModeBase != model.SuperModeBaseBiligo {
+		t.Fatalf("updated SuperModeBase = %q, want %q", task.SuperModeBase, model.SuperModeBaseBiligo)
+	}
 	if task.RushPollIntervalMillis != 120 || task.RestockPollIntervalMillis != 450 {
 		t.Fatalf("updated stage poll intervals = %d/%d, want 120/450", task.RushPollIntervalMillis, task.RestockPollIntervalMillis)
 	}
@@ -150,6 +157,7 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		LinkID:                    task.LinkID,
 		IsHotProject:              task.IsHotProject,
 		SuperMode:                 true,
+		SuperModeBase:             task.SuperModeBase,
 		TaskMode:                  model.TaskModeRestock,
 		DurationMode:              model.DurationModeUnlimited,
 		SelectedTickets:           task.SelectedTickets,
@@ -172,8 +180,8 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateTask restock super mode: %v", err)
 	}
-	if task.TaskMode != model.TaskModeRestock || !task.SuperMode {
-		t.Fatalf("restock task mode/superMode = %q/%v, want restock/true", task.TaskMode, task.SuperMode)
+	if task.TaskMode != model.TaskModeRestock || !task.SuperMode || task.SuperModeBase != model.SuperModeBaseBiligo {
+		t.Fatalf("restock task mode/superMode/superModeBase = %q/%v/%q, want restock/true/%q", task.TaskMode, task.SuperMode, task.SuperModeBase, model.SuperModeBaseBiligo)
 	}
 
 	task, log, err := store.SetTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 88, "2026-06-14T10:00:00+08:00", "时间同步完成")
@@ -265,6 +273,7 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		"project_name",
 		"proxy_mode",
 		"super_mode",
+		"super_mode_base",
 		"screen_id",
 		"sku_id",
 		"ticket_display",

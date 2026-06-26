@@ -62,6 +62,14 @@ type AccountFormMode = 'direct' | 'json'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
 
+const defaultSuperModeBase = 'show'
+const superModeBaseOptions = [
+  { value: 'show', label: 'show.bilibili.com' },
+  { value: 'bilibili_cn', label: 'www.bilibili.cn' },
+  { value: 'biligo', label: 'www.biligo.com' },
+  { value: 'me_bilibili', label: 'me.bilibili.cc' },
+]
+
 const sections: Array<{ key: SectionKey; label: string }> = [
   { key: 'accounts', label: '哔哩哔哩账号管理' },
   { key: 'notifications', label: '通知管理' },
@@ -161,6 +169,7 @@ const taskForm = reactive<TaskInput>({
   proxyGroupId: 0,
   proxyMode: 'round_robin',
   superMode: false,
+  superModeBase: defaultSuperModeBase,
   projectId: 0,
   projectName: '',
   screenId: 0,
@@ -1028,6 +1037,11 @@ function cleanConfig(config: Record<string, string>) {
   return output
 }
 
+function normalizeSuperModeBase(base?: string) {
+  const normalized = (base ?? '').trim()
+  return superModeBaseOptions.some((option) => option.value === normalized) ? normalized : defaultSuperModeBase
+}
+
 function resetTaskForm() {
   editingTaskId.value = null
   resetTicketProjectSelection()
@@ -1037,6 +1051,7 @@ function resetTaskForm() {
     proxyGroupId: 0,
     proxyMode: 'round_robin',
     superMode: false,
+    superModeBase: defaultSuperModeBase,
     projectId: 0,
     projectName: '',
     screenId: 0,
@@ -1078,6 +1093,7 @@ function editTask(task: Task) {
     proxyGroupId: task.proxyGroupId || 0,
     proxyMode: task.proxyMode || 'round_robin',
     superMode: Boolean(task.superMode),
+    superModeBase: normalizeSuperModeBase(task.superModeBase),
     projectId: task.projectId,
     projectName: task.projectName,
     screenId: task.screenId,
@@ -1207,6 +1223,7 @@ function normalizeTaskModeFields() {
   if (!['round_robin', 'concurrent'].includes(taskForm.proxyMode)) {
     taskForm.proxyMode = 'round_robin'
   }
+  taskForm.superModeBase = normalizeSuperModeBase(taskForm.superModeBase)
   if (taskForm.pollIntervalMillis <= 0) {
     taskForm.pollIntervalMillis = 1000
   }
@@ -2959,19 +2976,6 @@ onUnmounted(() => {
                 </el-form-item>
               </el-col>
             </template>
-            <el-col v-if="hasRushTaskSection || hasRestockTaskSection" :xs="24" :sm="12">
-              <el-form-item>
-                <template #label>
-                  <el-tooltip
-                    placement="top"
-                    content="开启后，抢票或回流下单阶段遇到 412 或 3 会自动切换域名，尝试降低 412 出现概率。"
-                  >
-                    <span class="tooltip-label">SuperMode</span>
-                  </el-tooltip>
-                </template>
-                <el-switch v-model="taskForm.superMode" active-text="开启" inactive-text="关闭" />
-              </el-form-item>
-            </el-col>
             <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item label="时间同步策略">
                 <el-select v-model="taskForm.timeSyncStrategy">
@@ -2990,6 +2994,33 @@ onUnmounted(() => {
               <span>建议距离开票时间大于 1 分钟时使用，时间过近可切换本地时间。</span>
             </div>
           </el-alert>
+          <el-row v-if="hasRushTaskSection || hasRestockTaskSection" :gutter="12">
+            <el-col :xs="24" :sm="12">
+              <el-form-item>
+                <template #label>
+                  <el-tooltip
+                    placement="top"
+                    content="开启后，抢票或回流下单阶段遇到 412 或 3 会自动切换域名，尝试降低 412 出现概率。"
+                  >
+                    <span class="tooltip-label">SuperMode</span>
+                  </el-tooltip>
+                </template>
+                <el-switch v-model="taskForm.superMode" active-text="开启" inactive-text="关闭" />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="首选域名">
+                <el-select v-model="taskForm.superModeBase" :disabled="!taskForm.superMode">
+                  <el-option
+                    v-for="option in superModeBaseOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
           <el-form-item label="订单类型">
             <el-input :model-value="String(taskForm.orderType)" disabled />
           </el-form-item>
