@@ -385,8 +385,6 @@ func TestRunnerConcurrentProxySkipsWarmupBeforeSaleStart(t *testing.T) {
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
 			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(false, false))
-		case "/api/ticket/project/getV2":
-			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		default:
@@ -470,8 +468,6 @@ func TestRunnerRefreshesHotProjectBeforeSaleStart(t *testing.T) {
 		case "/mall-search-items/items_detail/info":
 			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(true, true))
-		case "/api/ticket/project/getV2":
-			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
@@ -518,8 +514,6 @@ func TestRunnerLogsHotProjectPreSaleCheckWhenStateUnchanged(t *testing.T) {
 		case "/mall-search-items/items_detail/info":
 			infoCalls.Add(1)
 			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(true, false))
-		case "/api/ticket/project/getV2":
-			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
@@ -578,8 +572,6 @@ func TestRunnerKeepsLocalHotProjectAfterPreSaleRefreshFailures(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case "/mall-search-items/items_detail/info":
 			infoCalls.Add(1)
-			http.Error(w, "temporary failure", http.StatusBadGateway)
-		case "/api/ticket/project/getV2":
 			http.Error(w, "temporary failure", http.StatusBadGateway)
 		case "/api/ticket/order/prepare":
 			payload := decodeRunnerJSONBody(t, r)

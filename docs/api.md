@@ -461,7 +461,7 @@
 
 ## 票务信息获取
 
-票务信息获取逻辑迁移自 `biliTickerBuy/interface/project.py`：优先请求新版会员购项目详情接口，失败后回退旧版 `show.bilibili.com` 项目接口，并整理可选择的票信息。
+票务信息获取使用新版会员购项目详情接口，并整理可选择的票信息。
 
 ### GET `/api/ticket-projects/history`
 

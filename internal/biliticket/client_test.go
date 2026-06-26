@@ -459,6 +459,31 @@ func TestFetchPurchaseContextMapsProjectBuyersAndAddresses(t *testing.T) {
 	}
 }
 
+func TestFetchProjectDoesNotFallbackToOldProjectAPI(t *testing.T) {
+	var oldProjectCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+		case "/api/ticket/project/getV2":
+			oldProjectCalls.Add(1)
+			http.Error(w, "old project api should not be requested", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	if _, err := client.FetchProject(context.Background(), "1001701", "SESSDATA=test"); err == nil {
+		t.Fatal("FetchProject returned nil error, want new project api error")
+	}
+	if oldProjectCalls.Load() != 0 {
+		t.Fatalf("old project api calls = %d, want 0", oldProjectCalls.Load())
+	}
+}
+
 func TestCheckTicketStatusUsesClickableFlag(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

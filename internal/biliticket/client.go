@@ -500,15 +500,7 @@ func (c *Client) GetPayParam(ctx context.Context, orderID string, cookie string)
 }
 
 func (c *Client) fetchProjectPayload(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
-	newPayload, newErr := c.fetchProjectPayloadNew(ctx, projectID, cookie)
-	if newErr == nil {
-		return newPayload, nil
-	}
-	oldPayload, oldErr := c.fetchProjectPayloadOld(ctx, projectID, cookie)
-	if oldErr == nil {
-		return oldPayload, nil
-	}
-	return projectPayload{}, fmt.Errorf("获取项目详情失败：新版接口=%v；旧版接口=%v", newErr, oldErr)
+	return c.fetchProjectPayloadNew(ctx, projectID, cookie)
 }
 
 func (c *Client) fetchProjectPayloadNew(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
@@ -535,22 +527,6 @@ func (c *Client) fetchProjectPayloadNew(ctx context.Context, projectID int64, co
 		return projectPayload{}, errors.New("新版项目接口缺少 data")
 	}
 	return normalizeNewProjectPayload(data, projectID)
-}
-
-func (c *Client) fetchProjectPayloadOld(ctx context.Context, projectID int64, cookie string) (projectPayload, error) {
-	endpoint := fmt.Sprintf("%s/api/ticket/project/getV2?version=134&id=%d&project_id=%d", c.showBaseURL, projectID, projectID)
-	var response map[string]any
-	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, cookie, nil, &response); err != nil {
-		return projectPayload{}, err
-	}
-	if code, ok := optionalCode(response); !ok || code != 0 {
-		return projectPayload{}, errors.New(firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]), "旧版项目接口返回失败"))
-	}
-	data, ok := mapValue(response["data"])
-	if !ok {
-		return projectPayload{}, errors.New("旧版项目接口缺少 data")
-	}
-	return normalizeOldProjectPayload(data, projectID)
 }
 
 func (c *Client) fetchScreensByDate(ctx context.Context, projectID int64, date string, cookie string) ([]map[string]any, error) {
@@ -809,30 +785,6 @@ func normalizeNewProjectPayload(data map[string]any, fallbackProjectID int64) (p
 		VenueAddr:  stringValue(venue["address_detail"]),
 		StartTime:  startTime,
 		EndTime:    endTime,
-	}, nil
-}
-
-func normalizeOldProjectPayload(data map[string]any, fallbackProjectID int64) (projectPayload, error) {
-	rawScreens, ok := mapSliceValue(data["screen_list"])
-	if !ok {
-		return projectPayload{}, errors.New("旧版项目接口缺少 screen_list")
-	}
-	projectID := firstPositiveInt(int64Value(data["id"]), fallbackProjectID)
-	venue, _ := mapValue(data["venue_info"])
-	for _, screen := range rawScreens {
-		screen["project_id"] = firstPositiveInt(int64Value(screen["project_id"]), projectID)
-	}
-	return projectPayload{
-		ID:         projectID,
-		Name:       stringValue(data["name"]),
-		HotProject: hotProjectValue(data),
-		HasETicket: boolValue(data["has_eticket"]),
-		ScreenList: rawScreens,
-		SalesDates: extractSalesDates(data["sales_dates"]),
-		VenueName:  stringValue(venue["name"]),
-		VenueAddr:  stringValue(venue["address_detail"]),
-		StartTime:  int64Value(data["start_time"]),
-		EndTime:    int64Value(data["end_time"]),
 	}, nil
 }
 
